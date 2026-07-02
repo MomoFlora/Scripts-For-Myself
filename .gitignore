@@ -1,0 +1,4 @@
+# Gitea Manager
+gitea-manager.conf
+gitea-manager.log
+*.bak.*
