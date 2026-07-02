@@ -48,6 +48,10 @@ GITEA_HTTP_PORT="3000"
 GITEA_SSH_PORT="22"
 GITEA_DOMAIN="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost')"
 GITEA_ROOT_URL="http://${GITEA_DOMAIN}:${GITEA_HTTP_PORT}/"
+
+# Caddy 反代
+CADDY_ENABLED="false"
+CADDY_DOMAIN=""
 GITEA_DB_TYPE="postgres"
 GITEA_DB_HOST="127.0.0.1:5432"
 GITEA_DB_NAME="gitea"
@@ -72,7 +76,7 @@ ARCH=""
 OS=""
 OS_ID=""
 OS_VERSION=""
-TOTAL_STEPS=12
+TOTAL_STEPS=14
 CURRENT_STEP=0
 
 # ─── 工具函数 ───────────────────────────────────────────────────────────────────
@@ -98,7 +102,7 @@ banner() {
     echo "  ╚═════╝ ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝"
     echo -e "${C[NC]}"
     echo -e "${C[CD]}  Tools Manager ${C[W]}v${VERSION}"
-    echo -e "${C[CD]}  Gitea + Actions Runner + PostgreSQL 一键部署"
+    echo -e "${C[CD]}  Gitea + Caddy 反代 + Actions + PostgreSQL 一键部署"
     echo -e "${C[NC]}"
     draw_line "="
 }
@@ -261,6 +265,248 @@ install_dependencies() {
     esac
 
     ok "依赖安装完成"
+}
+
+# ─── Caddy 反代 & 域名配置 ────────────────────────────────────────────────────────
+
+prompt_domain() {
+    step_header "配置域名与反向代理"
+
+    echo ""
+    echo -e "  ${C[CD]}┌─────────────────────────────────────────────────────────────────────┐${C[NC]}"
+    echo -e "  ${C[CD]}│                     🌐 反向代理配置                                │${C[NC]}"
+    echo -e "  ${C[CD]}├─────────────────────────────────────────────────────────────────────┤${C[NC]}"
+    echo -e "  ${C[CD]}│${C[NC]}  Caddy 将自动为你的域名申请 SSL 证书 (Let's Encrypt)           ${C[CD]}│${C[NC]}"
+    echo -e "  ${C[CD]}│${C[NC]}  实现 HTTPS 安全访问 + 自动续期                               ${C[CD]}│${C[NC]}"
+    echo -e "  ${C[CD]}└─────────────────────────────────────────────────────────────────────┘${C[NC]}"
+    echo ""
+
+    # 获取本机IP作为提示
+    local local_ip
+    local_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'your-server-ip')"
+
+    echo -e "  ${C[W]}你的服务器 IP: ${C[YD]}${local_ip}${C[NC]}"
+    echo -e "  ${C[W]}请确保域名 DNS 已解析到该 IP 地址${C[NC]}"
+    echo ""
+
+    # 交互式输入域名
+    while true; do
+        read -rp $'  \033[1;36m请输入域名 (留空跳过反代配置): \033[0m' user_domain
+
+        if [ -z "$user_domain" ]; then
+            echo ""
+            warn "跳过反向代理配置 — Gitea 将直接通过 IP:端口 访问"
+            CADDY_ENABLED="false"
+            CADDY_DOMAIN=""
+            return 0
+        fi
+
+        # 简单校验域名格式
+        if echo "$user_domain" | grep -qE '^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'; then
+            CADDY_DOMAIN="$user_domain"
+            CADDY_ENABLED="true"
+            break
+        else
+            error "域名格式不正确，请输入类似 git.example.com 的域名"
+        fi
+    done
+
+    # 确认
+    echo ""
+    draw_box_top
+    draw_box_line "域名配置确认" "${C[YD]}"
+    draw_box_line "$(printf '%*s' 67 | tr ' ' '-')"
+    draw_box_line "域名:       ${C[GD]}${CADDY_DOMAIN}${C[W]}"
+    draw_box_line "Gitea 地址: ${C[CD]}https://${CADDY_DOMAIN}${C[W]}"
+    draw_box_line "SSH 地址:   ${C[W]}git@${CADDY_DOMAIN}"
+    draw_box_line "SSL 证书:   ${C[G]}Let's Encrypt 自动管理${C[W]}"
+    draw_box_bottom
+    echo ""
+
+    read -rp $'  \033[1;33m确认以上配置? [Y/n]: \033[0m' confirm
+    if [ "${confirm,,}" = "n" ] || [ "${confirm,,}" = "no" ]; then
+        warn "已取消，请重新输入"
+        CADDY_ENABLED="false"
+        CADDY_DOMAIN=""
+        prompt_domain
+        return
+    fi
+
+    ok "域名配置完成: ${CADDY_DOMAIN}"
+
+    # 更新 Gitea 全局变量
+    GITEA_DOMAIN="${CADDY_DOMAIN}"
+    GITEA_ROOT_URL="https://${CADDY_DOMAIN}/"
+    GITEA_SSH_DOMAIN="${CADDY_DOMAIN}"
+    GITEA_ADMIN_EMAIL="admin@${CADDY_DOMAIN}"
+
+    _log "INFO" "Domain configured: ${CADDY_DOMAIN} (Caddy reverse proxy)"
+}
+
+install_caddy() {
+    step_header "安装 Caddy 反向代理服务器"
+
+    if [ "$CADDY_ENABLED" != "true" ]; then
+        info "未配置域名，跳过 Caddy 安装"
+        return 0
+    fi
+
+    if command -v caddy &>/dev/null; then
+        ok "Caddy 已安装: $(caddy version 2>/dev/null | head -1)"
+    else
+        info "安装 Caddy..."
+        case "$OS" in
+            debian)
+                apt-get install -y -qq debian-keyring debian-archive-keyring 2>/dev/null
+                curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+                    | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null
+                curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+                    | tee /etc/apt/sources.list.d/caddy-stable.list 2>/dev/null
+                apt-get update -qq 2>/dev/null
+                apt-get install -y -qq caddy 2>/dev/null
+                ;;
+            rhel)
+                dnf install -y -q 'dnf-command(copr)' 2>/dev/null || true
+                dnf copr enable -y @caddy/caddy 2>/dev/null || true
+                dnf install -y -q caddy 2>/dev/null || \
+                    yum install -y -q yum-plugin-copr 2>/dev/null || true
+                ;;
+            arch)
+                pacman -S --noconfirm --needed caddy 2>/dev/null
+                ;;
+            *)
+                # 通用安装方式
+                curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=${ARCH}" \
+                    -o /usr/local/bin/caddy 2>/dev/null
+                chmod +x /usr/local/bin/caddy
+                # 创建 systemd 服务
+                caddy trust 2>/dev/null || true
+                ;;
+        esac
+        ok "Caddy 安装完成"
+    fi
+
+    # 确保必要的系统目录存在
+    mkdir -p /etc/caddy /var/log/caddy /var/lib/caddy
+}
+
+configure_caddy() {
+    step_header "配置 Caddy 反向代理"
+
+    if [ "$CADDY_ENABLED" != "true" ]; then
+        info "未配置域名，跳过 Caddy 配置"
+        return 0
+    fi
+
+    # 创建 Caddyfile
+    cat > /etc/caddy/Caddyfile << CADDY_EOF
+# ════════════════════════════════════════════════
+#  Caddyfile — Generated by Gitea Tools Manager
+#  Domain:  ${CADDY_DOMAIN}
+#  Backend: localhost:${GITEA_HTTP_PORT}
+#  Date:    $(date '+%Y-%m-%d %H:%M:%S')
+# ════════════════════════════════════════════════
+
+${CADDY_DOMAIN} {
+    # 日志
+    log {
+        output file /var/log/caddy/gitea.log
+        level INFO
+    }
+
+    # 反代到 Gitea
+    reverse_proxy localhost:${GITEA_HTTP_PORT} {
+        # 传递真实客户端IP
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-Host ${CADDY_DOMAIN}
+
+        # 传输 WebSocket (Gitea 实时功能需要)
+        header_up Connection {http.request.header.Connection}
+    }
+
+    # 安全头
+    header {
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+        -Server
+    }
+
+    # 文件上传大小限制 (默认 500MB)
+    request_body {
+        max_size 500MB
+    }
+
+    # Let's Encrypt 证书邮箱
+    tls ${GITEA_ADMIN_EMAIL}
+}
+
+# HTTP → HTTPS 自动重定向
+http://${CADDY_DOMAIN} {
+    redir https://{host}{uri} permanent
+}
+CADDY_EOF
+
+    ok "Caddyfile 已生成: /etc/caddy/Caddyfile"
+
+    # 验证配置
+    if caddy validate --config /etc/caddy/Caddyfile 2>/dev/null; then
+        ok "Caddy 配置验证通过"
+    else
+        warn "Caddy 配置验证有警告，将继续"
+    fi
+
+    # 开放防火墙端口
+    info "检查防火墙规则..."
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        ufw allow 80/tcp comment "Caddy HTTP" 2>/dev/null || true
+        ufw allow 443/tcp comment "Caddy HTTPS" 2>/dev/null || true
+        ok "UFW 防火墙已开放 80/443 端口"
+    elif command -v firewall-cmd &>/dev/null && firewall-cmd --state 2>/dev/null | grep -q "running"; then
+        firewall-cmd --permanent --add-service=http --add-service=https 2>/dev/null || true
+        firewall-cmd --reload 2>/dev/null || true
+        ok "Firewalld 已开放 HTTP/HTTPS 服务"
+    else
+        info "未检测到防火墙，跳过端口开放（请手动确保 80/443 端口可访问）"
+    fi
+
+    # 创建 systemd 服务（如果通用方式安装）
+    if [ ! -f /etc/systemd/system/caddy.service ] && [ ! -f /lib/systemd/system/caddy.service ]; then
+        info "创建 Caddy systemd 服务..."
+        cat > /etc/systemd/system/caddy.service << 'SYSTEMD_CADDY'
+[Unit]
+Description=Caddy Web Server
+Documentation=https://caddyserver.com/docs/
+After=network.target network-online.target
+Requires=network-online.target
+
+[Service]
+Type=notify
+User=caddy
+Group=caddy
+ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile
+ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile
+TimeoutStopSec=5
+LimitNOFILE=1048576
+LimitNPROC=512
+PrivateTmp=true
+ProtectSystem=full
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target
+SYSTEMD_CADDY
+
+        # 创建 caddy 用户
+        if ! id caddy &>/dev/null; then
+            useradd --system --shell /bin/false --home-dir /var/lib/caddy caddy 2>/dev/null || true
+        fi
+        chown -R caddy:caddy /etc/caddy /var/log/caddy /var/lib/caddy 2>/dev/null || true
+    fi
+
+    systemctl daemon-reload
+    ok "Caddy 配置完成"
 }
 
 # ─── PostgreSQL 安装 ─────────────────────────────────────────────────────────────
@@ -784,6 +1030,31 @@ start_services() {
     warn "Gitea 启动超时，请检查日志: journalctl -u gitea -f"
 }
 
+start_caddy() {
+    if [ "$CADDY_ENABLED" != "true" ]; then
+        return 0
+    fi
+
+    step_header "启动 Caddy 反向代理"
+
+    info "启动 Caddy..."
+    if systemctl is-active --quiet caddy 2>/dev/null; then
+        systemctl reload caddy 2>/dev/null || systemctl restart caddy
+    else
+        systemctl enable caddy 2>/dev/null || true
+        systemctl start caddy 2>/dev/null || true
+    fi
+
+    # 等待 Caddy 就绪
+    sleep 3
+    if systemctl is-active --quiet caddy 2>/dev/null; then
+        ok "Caddy 已启动 — 监听 80/443 端口"
+        ok "访问地址: ${C[GD]}https://${CADDY_DOMAIN}${C[W]}"
+    else
+        warn "Caddy 启动失败，请检查日志: journalctl -u caddy -f"
+    fi
+}
+
 # ─── 配置持久化 ─────────────────────────────────────────────────────────────────
 
 save_config() {
@@ -814,6 +1085,9 @@ GITEA_ADMIN_EMAIL=${GITEA_ADMIN_EMAIL}
 
 ACTIONS_RUNNER_ENABLED=${ACTIONS_RUNNER_ENABLED}
 ACTIONS_RUNNER_VERSION=${ACTIONS_RUNNER_VERSION}
+
+CADDY_ENABLED=${CADDY_ENABLED}
+CADDY_DOMAIN=${CADDY_DOMAIN}
 EOF
 
     chmod 600 "$CONFIG_FILE"
@@ -864,9 +1138,24 @@ show_status() {
     fi
     draw_box_line "Actions Runner: ${runner_status}"
 
+    # Caddy
+    local caddy_status="未配置"
+    if [ "$CADDY_ENABLED" = "true" ]; then
+        if systemctl is-active --quiet caddy 2>/dev/null; then
+            caddy_status="${C[G]}● 运行中${C[W]}"
+        else
+            caddy_status="${C[R]}○ 已停止${C[W]}"
+        fi
+    fi
+    draw_box_line "Caddy (HTTPS):  ${caddy_status}"
+
     # 访问地址
     draw_box_line ""
-    draw_box_line "访问地址: ${C[YD]}http://${GITEA_DOMAIN}:${GITEA_HTTP_PORT}/${C[W]}"
+    if [ "$CADDY_ENABLED" = "true" ] && [ -n "$CADDY_DOMAIN" ]; then
+        draw_box_line "🌐 访问地址: ${C[YD]}https://${CADDY_DOMAIN}${C[W]}"
+    else
+        draw_box_line "🌐 访问地址: ${C[YD]}http://${GITEA_DOMAIN}:${GITEA_HTTP_PORT}/${C[W]}"
+    fi
 
     draw_box_bottom
 }
@@ -1003,6 +1292,7 @@ full_install() {
     echo ""
     echo -e "  ${C[YD]}即将开始一键部署:${C[NC]}"
     echo -e "  ${C[W]}  • Gitea (Git 服务)${C[NC]}"
+    echo -e "  ${C[W]}  • Caddy 反向代理 + 自动 HTTPS${C[NC]}"
     echo -e "  ${C[W]}  • PostgreSQL (数据库)${C[NC]}"
     echo -e "  ${C[W]}  • Gitea Actions Runner${C[NC]}"
     echo -e "  ${C[W]}  • Docker (Actions Runner 依赖)${C[NC]}"
@@ -1029,9 +1319,11 @@ full_install() {
     fi
 
     # 按顺序执行安装步骤
+    prompt_domain
     install_dependencies
     install_postgresql
     configure_postgresql
+    install_caddy
     fetch_gitea_version
     setup_gitea_user
     setup_directories
@@ -1039,6 +1331,8 @@ full_install() {
     download_gitea
     create_systemd_service
     start_services
+    configure_caddy
+    start_caddy
     create_admin_user
     setup_actions_runner
 
@@ -1062,6 +1356,7 @@ full_install() {
     echo -e "  ${C[W]}常用命令:${C[NC]}"
     echo -e "  ${C[CD]}systemctl status gitea${C[NC]}        查看 Gitea 状态"
     echo -e "  ${C[CD]}journalctl -u gitea -f${C[NC]}         查看 Gitea 日志"
+    echo -e "  ${C[CD]}systemctl status caddy${C[NC]}         查看 Caddy 状态"
     echo -e "  ${C[CD]}${GITEA_HOME}/register-runner.sh${C[NC]}    注册 Actions Runner"
     echo -e "  ${C[CD]}$0 check${C[NC]}                       检查更新"
     echo -e "  ${C[CD]}$0 update${C[NC]}                       更新到最新版本"
@@ -1112,7 +1407,7 @@ usage() {
     echo -e "${C[YD]}用法:${C[NC]} $0 <命令> [选项]"
     echo ""
     echo -e "${C[WD]}命令:${C[NC]}"
-    echo -e "  ${C[CD]}install${C[NC]}    一键安装 Gitea + PostgreSQL + Actions Runner"
+    echo -e "  ${C[CD]}install${C[NC]}    一键安装 Gitea + Caddy反代 + PostgreSQL + Actions Runner"
     echo -e "  ${C[CD]}update${C[NC]}     更新 Gitea 到最新版本"
     echo -e "  ${C[CD]}check${C[NC]}      检查是否有新版本"
     echo -e "  ${C[CD]}status${C[NC]}     查看服务运行状态"
@@ -1156,6 +1451,13 @@ do_uninstall() {
     rm -rf /etc/gitea
     rm -f "$CONFIG_FILE"
 
+    # 清理 Caddy
+    systemctl stop caddy 2>/dev/null || true
+    systemctl disable caddy 2>/dev/null || true
+    rm -f /etc/systemd/system/caddy.service
+    rm -f /etc/caddy/Caddyfile
+    systemctl daemon-reload
+
     # 删除数据库
     su - postgres -c "psql -c 'DROP DATABASE IF EXISTS ${GITEA_DB_NAME};'" 2>/dev/null || true
     su - postgres -c "psql -c 'DROP ROLE IF EXISTS ${GITEA_DB_USER};'" 2>/dev/null || true
@@ -1180,6 +1482,8 @@ show_config() {
     draw_box_line "数据库用户:    ${GITEA_DB_USER:-gitea}"
     draw_box_line "管理员:        ${GITEA_ADMIN_USER:-N/A}"
     draw_box_line "Actions Runner: ${ACTIONS_RUNNER_ENABLED:-true}"
+    draw_box_line "Caddy 反代:    ${CADDY_ENABLED:-false}"
+    draw_box_line "反向代理域名:  ${CADDY_DOMAIN:-未配置}"
     draw_box_line "配置文件:      ${CONFIG_FILE}"
     draw_box_bottom
     echo ""

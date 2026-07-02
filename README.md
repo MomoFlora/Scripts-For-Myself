@@ -1,6 +1,6 @@
 # 🍵 Gitea Tools Manager
 
-> 一键部署 Gitea + Gitea Actions Runner + PostgreSQL 的全自动脚本
+> 一键部署 Gitea + Caddy 反向代理 + Actions Runner + PostgreSQL 的全自动脚本
 
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-linux%2Famd64%7Carm64-brightgreen.svg)]()
@@ -10,7 +10,8 @@
 
 ## ✨ 功能特性
 
-- 🚀 **一键安装** — Gitea + PostgreSQL + Actions Runner 全自动部署
+- 🚀 **一键安装** — Gitea + Caddy 反代 + PostgreSQL + Actions Runner 全自动部署
+- 🌐 **Caddy 反向代理** — 输入域名即可自动配置 HTTPS + Let's Encrypt SSL
 - 🏗️ **多架构支持** — amd64 / arm64 / armv7 / riscv64 / loong64
 - 🐘 **PostgreSQL 数据库** — 自动安装、配置、授权
 - 🐳 **Actions Runner** — Docker 环境 + act_runner 自动配置
@@ -58,7 +59,7 @@ sudo ./gitea-manager.sh install
 用法: ./gitea-manager.sh <命令> [选项]
 
 命令:
-  install     一键安装 Gitea + PostgreSQL + Actions Runner
+  install     一键安装 Gitea + Caddy 反代 + PostgreSQL + Actions Runner
   update      更新 Gitea 到最新版本
   check       检查是否有新版本
   status      查看服务运行状态
@@ -78,18 +79,20 @@ sudo ./gitea-manager.sh install
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  Step 1  检测操作系统与 CPU 架构                          │
+│  Step 1  配置域名 & Caddy 反代 (交互式输入)               │
 │  Step 2  安装系统依赖 (curl, git, gnupg, ...)            │
 │  Step 3  安装 PostgreSQL 数据库                          │
 │  Step 4  创建数据库 & 用户 & 授权                         │
-│  Step 5  获取 Gitea 最新版本号                            │
-│  Step 6  创建 Gitea 系统用户                             │
-│  Step 7  创建目录结构                                    │
-│  Step 8  生成 Gitea 配置文件 (app.ini)                   │
-│  Step 9  下载 Gitea 二进制 (SHA256 校验)                 │
-│  Step 10 创建 Systemd 服务                               │
-│  Step 11 启动服务 & 健康检查                              │
-│  Step 12 创建管理员用户                                   │
+│  Step 5  安装 Caddy Web Server                           │
+│  Step 6  获取 Gitea 最新版本号                            │
+│  Step 7  创建 Gitea 系统用户                             │
+│  Step 8  创建目录结构                                    │
+│  Step 9  生成 Gitea 配置文件 (app.ini)                   │
+│  Step 10 下载 Gitea 二进制 (SHA256 校验)                 │
+│  Step 11 创建 Systemd 服务                               │
+│  Step 12 启动 Gitea 服务 & 健康检查                       │
+│  Step 13 配置 Caddy 反向代理 + SSL 证书                   │
+│  Step 14 创建管理员用户                                   │
 │          + 配置 Actions Runner + Docker                  │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -106,22 +109,24 @@ sudo ./gitea-manager.sh install
 sudo /var/lib/gitea/register-runner.sh
 ```
 
-### 设置 Nginx 反向代理
+### 反向代理与 HTTPS
 
-```nginx
-server {
-    listen 80;
-    server_name git.example.com;
+安装脚本会**交互式提示你输入域名**（如 `git.example.com`）。输入后 Caddy 自动：
 
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
+1. 配置反向代理（Gitea → 你的域名）
+2. 通过 Let's Encrypt 自动申请 SSL 证书
+3. 启用 HTTP→HTTPS 自动跳转
+4. 配置防火墙规则（UFW / Firewalld）
+5. 证书到期自动续期，无需人工干预
+
+如果留空则跳过，Gitea 将直接通过 HTTP + IP:端口 访问。
+
+```bash
+# 安装时会提示：
+#   请输入域名 (留空跳过反代配置): git.example.com
 ```
+
+之后可以通过 `systemctl status caddy` 查看 Caddy 状态。
 
 ---
 
@@ -144,11 +149,15 @@ sudo ./gitea-manager.sh update
 
 ```
 /usr/local/bin/gitea                    # Gitea 可执行文件
+/usr/local/bin/act_runner               # Actions Runner 可执行文件
 /etc/gitea/app.ini                      # Gitea 配置文件
+/etc/caddy/Caddyfile                    # Caddy 反代配置
 /var/lib/gitea/                         # Gitea 数据目录
 /var/lib/gitea/repositories/            # Git 仓库存储
 /var/lib/gitea/.runner/                 # Actions Runner 配置
+/var/log/caddy/gitea.log                # Caddy 访问日志
 /etc/systemd/system/gitea.service       # Gitea 服务
+/etc/systemd/system/caddy.service       # Caddy 服务
 /etc/systemd/system/gitea-actions-runner.service  # Runner 服务
 ```
 
@@ -175,13 +184,33 @@ sudo ./gitea-manager.sh uninstall
   ╚═════╝ ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝
 
   Tools Manager v1.0.0
-  Gitea + Actions Runner + PostgreSQL 一键部署
+  Gitea + Caddy 反代 + Actions Runner + PostgreSQL 一键部署
 
-┌─ Step 1/12 ──────────────────────────────────────────────────┐
-│ ▶ 检测操作系统与架构
+┌─ Step 1/14 ──────────────────────────────────────────────────┐
+│ ▶ 配置域名与反向代理
 └──────────────────────────────────────────────────────────────┘
-  ✔ 操作系统: ubuntu 24.04  (debian)
-  ✔ CPU 架构:  amd64
+  ┌─────────────────────────────────────────────────────────────┐
+  │                     🌐 反向代理配置                          │
+  ├─────────────────────────────────────────────────────────────┤
+  │  Caddy 将自动为你的域名申请 SSL 证书 (Let's Encrypt)         │
+  │  实现 HTTPS 安全访问 + 自动续期                             │
+  └─────────────────────────────────────────────────────────────┘
+
+  你的服务器 IP: 192.168.1.100
+  请确保域名 DNS 已解析到该 IP 地址
+
+  请输入域名 (留空跳过反代配置): git.example.com
+
+  ╔══════════════════════════════════════════════════════════════╗
+  ║  域名配置确认                                                ║
+  ║ ──────────────────────────────────────────────────────────── ║
+  ║  域名:       git.example.com                                 ║
+  ║  Gitea 地址: https://git.example.com                         ║
+  ║  SSH 地址:   git@git.example.com                             ║
+  ║  SSL 证书:   Let's Encrypt 自动管理                          ║
+  ╚══════════════════════════════════════════════════════════════╝
+
+  ... 后续步骤 ...
 
   ╔══════════════════════════════════════════════════════════════╗
   ║              ✅ 安装全部完成!                                ║
@@ -193,7 +222,9 @@ sudo ./gitea-manager.sh uninstall
   ║ Gitea:          ● 运行中                                    ║
   ║ PostgreSQL:     ● 运行中                                    ║
   ║ Actions Runner: ● 已安装                                    ║
-  ║ 访问地址: http://192.168.1.100:3000/                        ║
+  ║ Caddy (HTTPS):  ● 运行中                                    ║
+  ║                                                              ║
+  ║ 🌐 访问地址: https://git.example.com                        ║
   ╚══════════════════════════════════════════════════════════════╝
 
   ┌─────────────────────────────────────────────────────────────┐
