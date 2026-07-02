@@ -37,6 +37,14 @@
 
 ## 🚀 快速开始
 
+### 方式一：一键脚本（推荐）
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/MomoFlora/Gitea-Tools-Manager/refs/heads/master/gitea-manager.sh | sudo bash -s install
+```
+
+### 方式二：克隆仓库
+
 ```bash
 # 1. 克隆仓库
 git clone https://github.com/MomoFlora/Gitea-Tools-Manager.git
@@ -134,13 +142,14 @@ sudo /var/lib/gitea/register-runner.sh
 
 ```bash
 # 检查是否有更新
-./gitea-manager.sh check
+curl -fsSL https://raw.githubusercontent.com/MomoFlora/Gitea-Tools-Manager/refs/heads/master/gitea-manager.sh | sudo bash -s check
 
 # 执行更新 (自动备份配置、下载新版本、重启服务)
-sudo ./gitea-manager.sh update
+curl -fsSL https://raw.githubusercontent.com/MomoFlora/Gitea-Tools-Manager/refs/heads/master/gitea-manager.sh | sudo bash -s update
 
-# 后台定时检查 (配合 screen/tmux 使用)
-./gitea-manager.sh watch 86400
+# 或本地执行
+./gitea-manager.sh check
+sudo ./gitea-manager.sh update
 ```
 
 ---
