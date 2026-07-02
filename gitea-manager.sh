@@ -692,35 +692,33 @@ setup_runner() {
 
     usermod -aG docker "$GT_USR" 2>/dev/null || true
 
-    local rv; rv="$(curl -sSL https://gitea.com/api/v1/repos/gitea/act_runner/releases/latest 2>/dev/null \
+    # 从 gitea/runner 仓库获取最新版本
+    local rv; rv="$(curl -sSL https://gitea.com/api/v1/repos/gitea/runner/releases/latest 2>/dev/null \
         | grep -oP '"tag_name":\s*"\K[^"]+' | sed 's/^v//')"
-    if [ -z "$rv" ]; then rv="0.2.11"; fi
+    if [ -z "$rv" ]; then rv="2.0.0"; fi
 
     local ra="$ARCH"
-    case "$ra" in amd64|arm64) ;; arm-6) ra="armv6" ;; *) ra="amd64" ;; esac
+    case "$ra" in amd64|arm64) ;; arm-6) ra="arm-6" ;; arm-5) ra="arm-5" ;; loong64) ra="loong64" ;; *) ra="amd64" ;; esac
 
-    # 优先从 dl.gitea.com 下载 (官方 CDN)
-    local rurl="https://dl.gitea.com/act_runner/${rv}/act_runner-${rv}-linux-${ra}"
-    if ! curl -fsSL -o /usr/local/bin/act_runner "$rurl" 2>/dev/null; then
-        # 回退到 releases 页面
-        rurl="https://gitea.com/gitea/act_runner/releases/download/v${rv}/act_runner-${rv}-linux-${ra}"
-        curl -fsSL -o /usr/local/bin/act_runner "$rurl" 2>/dev/null || {
-            LOG_WARN "act_runner 下载失败，跳过"; return 0
-        }
+    # 官方下载地址: gitea.com/gitea/runner/releases
+    local rurl="https://gitea.com/gitea/runner/releases/download/v${rv}/gitea-runner-${rv}-linux-${ra}"
+    if curl -fsSL -o /usr/local/bin/gitea-runner "$rurl" 2>/dev/null; then
+        chmod +x /usr/local/bin/gitea-runner
+        LOG_OK "gitea-runner v${rv} 已安装"
+    else
+        LOG_WARN "gitea-runner 下载失败"; return 0
     fi
-    chmod +x /usr/local/bin/act_runner
-    LOG_OK "act_runner v${rv} 已安装"
 
     # 自动生成 Runner token 并注册
     LOG_OUT "注册 Actions Runner ..."
     local token; token="$(su -s /bin/bash "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} --config ${GT_CFG} actions generate-runner-token 2>/dev/null" || true)"
     if [ -z "$token" ]; then
         LOG_WARN "无法自动获取 Runner token，请手动注册"
-        LOG_OUT "手动注册: /usr/local/bin/act_runner register --instance http://localhost:${GT_PORT}"
+        LOG_OUT "手动注册: /usr/local/bin/gitea-runner register --instance http://localhost:${GT_PORT}"
         return 0
     fi
 
-    su -s /bin/bash "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} /usr/local/bin/act_runner register \
+    su -s /bin/bash "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} /usr/local/bin/gitea-runner register \
         --no-interactive \
         --instance http://localhost:${GT_PORT} \
         --token '${token}' \
