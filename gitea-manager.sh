@@ -73,7 +73,7 @@ C_BWT=$'\033[1;37m'
 # ──────────────────────────────────────────────────────────────
 _log() { printf "[%(%F %T)T] %-7s %s\n" -1 "$1" "$2" >> "$LOG_FILE"; }
 
-_hr() { printf "${C_DIM}%*s${C_RST}\n" "$WIDTH" "" | tr ' ' '─'; }
+_hr() { printf "${C_DIM}%*s${C_RST}\n" "$WIDTH" "" | tr ' ' '-'; }
 
 _title() { printf "\n${C_BCY}  %s${C_RST}\n" "$*"; _hr; }
 
@@ -147,11 +147,12 @@ install_deps() {
 
     case "$OS" in
         debian)
+            export DEBIAN_FRONTEND=noninteractive
             apt-get update -qq 2>/dev/null || true
-            apt-get install -y -qq $pkgs 2>/dev/null
+            apt-get install -y -qq -o Dpkg::Use-Pty=0 $pkgs 2>/dev/null
             if ! command -v docker &>/dev/null; then
                 _info "安装 Docker..."
-                apt-get install -y -qq docker.io docker-compose-v2 2>/dev/null || \
+                apt-get install -y -qq -o Dpkg::Use-Pty=0 docker.io docker-compose-v2 2>/dev/null || \
                     curl -fsSL https://get.docker.com | bash -s 2>/dev/null
             fi
             ;;
@@ -202,7 +203,7 @@ install_gitea() {
     # ── 下载二进制 ──
     local url="https://dl.gitea.com/gitea/${GITEA_VERSION}/gitea-${GITEA_VERSION}-linux-${ARCH}"
     _info "下载 ${url}"
-    curl -fSL# -o "${GITEA_BIN}.tmp" "$url" || {
+    curl -fsSL -o "${GITEA_BIN}.tmp" "$url" || {
         _err "下载失败!"
         return 1
     }
@@ -281,7 +282,7 @@ install_postgresql() {
     else
         case "$OS" in
             debian)
-                apt-get install -y -qq postgresql postgresql-client 2>/dev/null ;;
+                apt-get install -y -qq -o Dpkg::Use-Pty=0 postgresql postgresql-client 2>/dev/null ;;
             rhel)
                 dnf install -y -q postgresql-server postgresql 2>/dev/null || \
                     yum install -y -q postgresql-server postgresql 2>/dev/null
@@ -314,33 +315,38 @@ install_postgresql() {
     _info "创建数据库用户 ${PG_USER} ..."
     su - postgres -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='${PG_USER}'\"" 2>/dev/null \
         | grep -q 1 || {
-        su - postgres -c "psql -c \"SET password_encryption='scram-sha-256'; CREATE ROLE ${PG_USER} LOGIN PASSWORD '${PG_PASS}';\""
+        su - postgres -c "psql -q -c \"SET password_encryption='scram-sha-256'; CREATE ROLE ${PG_USER} LOGIN PASSWORD '${PG_PASS}';\""
     }
 
     # ── 创建数据库 ──
     _info "创建数据库 ${PG_NAME} ..."
     su - postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='${PG_NAME}'\"" 2>/dev/null \
         | grep -q 1 || {
-        su - postgres -c "psql -c \"CREATE DATABASE ${PG_NAME} OWNER ${PG_USER} ENCODING 'UTF8' LC_COLLATE='en_US.UTF-8' LC_CTYPE='en_US.UTF-8' TEMPLATE template0;\""
+        su - postgres -c "psql -q -c \"CREATE DATABASE ${PG_NAME} OWNER ${PG_USER} ENCODING 'UTF8' LC_COLLATE='en_US.UTF-8' LC_CTYPE='en_US.UTF-8' TEMPLATE template0;\""
     }
 
-    su - postgres -c "psql -c 'GRANT ALL PRIVILEGES ON DATABASE ${PG_NAME} TO ${PG_USER};'"
-    su - postgres -c "psql -c 'GRANT ALL ON SCHEMA public TO ${PG_USER};' -d ${PG_NAME}" 2>/dev/null || true
+    su - postgres -c "psql -c 'GRANT ALL PRIVILEGES ON DATABASE ${PG_NAME} TO ${PG_USER};'" >/dev/null
+    su - postgres -c "psql -c 'GRANT ALL ON SCHEMA public TO ${PG_USER};' -d ${PG_NAME}" >/dev/null 2>&1 || true
 
-    # ── pg_hba.conf ──
+    # ── pg_hba.conf — 插入到文件顶部 (PostgreSQL 用 first-match 策略) ──
     local hba; hba="$(su - postgres -c "psql -t -c 'SHOW hba_file;'" 2>/dev/null | tr -d ' ')" || true
     if [ -n "$hba" ] && [ -f "$hba" ]; then
         if ! grep -qF "gitea" "$hba" 2>/dev/null; then
-            _info "配置 pg_hba.conf 认证..."
-            {
-                echo ""
-                echo "# Gitea — managed by gitea-manager"
-                echo "host    ${PG_NAME}    ${PG_USER}    127.0.0.1/32    scram-sha-256"
-                echo "host    ${PG_NAME}    ${PG_USER}    ::1/128         scram-sha-256"
-            } >> "$hba"
+            _info "配置 pg_hba.conf (scram-sha-256)..."
+            # 备份原文件
+            cp "$hba" "${hba}.bak.$(date +%Y%m%d%H%M%S)"
+            # 插入到第一行 — 确保优先级高于任何 catch-all 规则
+            sed -i "1i\
+# Gitea — managed by gitea-manager\n\
+host    ${PG_NAME}    ${PG_USER}    127.0.0.1/32    scram-sha-256\n\
+host    ${PG_NAME}    ${PG_USER}    ::1/128         scram-sha-256\n\
+" "$hba"
             systemctl reload postgresql 2>/dev/null || \
                 su - postgres -c "pg_ctl reload -D /var/lib/postgresql/*/main/" 2>/dev/null || true
-            _ok "pg_hba.conf 已更新 (scram-sha-256)"
+            sleep 1
+            _ok "pg_hba.conf 已更新 (行首插入)"
+        else
+            _info "pg_hba.conf 已有 gitea 规则"
         fi
     fi
 
@@ -348,7 +354,11 @@ install_postgresql() {
     if PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_NAME" -c "SELECT 1;" &>/dev/null; then
         _ok "数据库连接测试通过"
     else
-        _warn "数据库连接测试失败，将继续 (检查 pg_hba.conf)"
+        _err "数据库连接失败! pg_hba.conf 可能仍使用了错误的认证方式"
+        _info "当前 pg_hba.conf 前 5 行:"
+        if [ -n "$hba" ]; then head -5 "$hba" | while IFS= read -r l; do printf "    ${C_DIM}%s${C_RST}\n" "$l"; done; fi
+        _info "手动修复: 确保 scram-sha-256 规则在 pg_hba.conf 的第一条有效行"
+        _info "然后执行: systemctl reload postgresql"
     fi
 
     _log INFO "postgresql configured: ${PG_USER}@${PG_HOST}:${PG_PORT}/${PG_NAME}"
@@ -498,12 +508,12 @@ install_caddy() {
     else
         case "$OS" in
             debian)
-                curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+                curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' 2>/dev/null \
                     | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null
-                curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-                    | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+                curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' 2>/dev/null \
+                    > /etc/apt/sources.list.d/caddy-stable.list
                 apt-get update -qq 2>/dev/null
-                apt-get install -y -qq caddy 2>/dev/null
+                apt-get install -y -qq -o Dpkg::Use-Pty=0 caddy 2>/dev/null
                 ;;
             rhel)
                 dnf install -y -q 'dnf-command(copr)' 2>/dev/null || true
@@ -820,7 +830,7 @@ cmd_update() {
     _info "备份 → ${GITEA_CONF}.bak.*"
 
     local url="https://dl.gitea.com/gitea/${GITEA_VERSION}/gitea-${GITEA_VERSION}-linux-${ARCH}"
-    curl -fSL# -o "${GITEA_BIN}.tmp" "$url" && chmod +x "${GITEA_BIN}.tmp" && mv "${GITEA_BIN}.tmp" "$GITEA_BIN"
+    curl -fsSL -o "${GITEA_BIN}.tmp" "$url" && chmod +x "${GITEA_BIN}.tmp" && mv "${GITEA_BIN}.tmp" "$GITEA_BIN"
 
     save_config
     systemctl start gitea
