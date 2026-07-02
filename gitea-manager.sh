@@ -13,27 +13,27 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CONFIG_FILE="${SCRIPT_DIR}/gitea-manager.conf"
 LOG_FILE="${SCRIPT_DIR}/gitea-manager.log"
 
-# 颜色定义
+# 颜色定义 (使用 $'...' 生成真实的 ANSI 转义码)
 declare -A C=(
-    [R]='\033[0;31m'     # Red
-    [G]='\033[0;32m'     # Green
-    [Y]='\033[0;33m'     # Yellow
-    [B]='\033[0;34m'     # Blue
-    [P]='\033[0;35m'     # Purple
-    [C]='\033[0;36m'     # Cyan
-    [W]='\033[0;37m'     # White
-    [RD]='\033[1;31m'    # Bold Red
-    [GD]='\033[1;32m'    # Bold Green
-    [YD]='\033[1;33m'    # Bold Yellow
-    [BD]='\033[1;34m'    # Bold Blue
-    [PD]='\033[1;35m'    # Bold Purple
-    [CD]='\033[1;36m'    # Bold Cyan
-    [WD]='\033[1;37m'    # Bold White
-    [BG_R]='\033[41m'    # BG Red
-    [BG_G]='\033[42m'    # BG Green
-    [BG_B]='\033[44m'    # BG Blue
-    [BG_P]='\033[45m'    # BG Purple
-    [NC]='\033[0m'       # No Color
+    [R]=$'\033[0;31m'     # Red
+    [G]=$'\033[0;32m'     # Green
+    [Y]=$'\033[0;33m'     # Yellow
+    [B]=$'\033[0;34m'     # Blue
+    [P]=$'\033[0;35m'     # Purple
+    [C]=$'\033[0;36m'     # Cyan
+    [W]=$'\033[0;37m'     # White
+    [RD]=$'\033[1;31m'    # Bold Red
+    [GD]=$'\033[1;32m'    # Bold Green
+    [YD]=$'\033[1;33m'    # Bold Yellow
+    [BD]=$'\033[1;34m'    # Bold Blue
+    [PD]=$'\033[1;35m'    # Bold Purple
+    [CD]=$'\033[1;36m'    # Bold Cyan
+    [WD]=$'\033[1;37m'    # Bold White
+    [BG_R]=$'\033[41m'    # BG Red
+    [BG_G]=$'\033[42m'    # BG Green
+    [BG_B]=$'\033[44m'    # BG Blue
+    [BG_P]=$'\033[45m'    # BG Purple
+    [NC]=$'\033[0m'       # No Color
 )
 
 # 默认配置
@@ -127,18 +127,29 @@ draw_line() {
 }
 
 draw_box_top() {
-    local width=70
-    printf "  ${C[BD]}╔%s╗${C[NC]}\n" "$(printf '%*s' "$width" | tr ' ' '═')"
+    printf "  ${C[BD]}╔══════════════════════════════════════════════════════════════════════╗${C[NC]}\n"
 }
 
 draw_box_bottom() {
-    local width=70
-    printf "  ${C[BD]}╚%s╝${C[NC]}\n" "$(printf '%*s' "$width" | tr ' ' '═')"
+    printf "  ${C[BD]}╚══════════════════════════════════════════════════════════════════════╝${C[NC]}\n"
 }
 
+# ANSI 去色函数 — 返回可见字符长度
+_strip_ansi() { sed 's/\x1b\[[0-9;]*m//g' <<< "$1"; }
+
 draw_box_line() {
-    local text="$1" color="${2:-${C[W]}}"
-    printf "  ${C[BD]}║${C[NC]} ${color}%-67s${C[NC]} ${C[BD]}║${C[NC]}\n" "$text"
+    local text="$1" color="${2:-${C[W]}}" inner stripped viz pad
+    inner="${color}${text}${C[NC]}"
+    stripped=$(_strip_ansi "$inner")
+    viz=${#stripped}
+    pad=$((68 - viz))
+    [ "$pad" -lt 1 ] && pad=1
+    printf "  ${C[BD]}║${C[NC]} ${inner}%*s${C[BD]}║${C[NC]}\n" "$pad" ""
+}
+
+# 短分隔线
+draw_divider() {
+    printf "  ${C[BD]}╟──────────────────────────────────────────────────────────────────╢${C[NC]}\n"
 }
 
 step_header() {
@@ -740,73 +751,59 @@ generate_gitea_config() {
 ;  Date:     $(date '+%Y-%m-%d %H:%M:%S')
 ; ════════════════════════════════════════════════
 
-[APP_NAME]
-APP_NAME        = Gitea: Git with a cup of tea
-RUN_USER        = ${GITEA_USER}
-RUN_MODE        = prod
+; ── 全局设置 ─────────────────────────────────────
+APP_NAME   = Gitea: Git with a cup of tea
+RUN_USER   = ${GITEA_USER}
+RUN_MODE   = prod
 
 [repository]
-ROOT            = ${GITEA_HOME}/repositories
-DEFAULT_BRANCH  = main
-
-[repository.local]
-LOCAL_COPY_PATH = ${GITEA_HOME}/gitea-repositories
+ROOT           = ${GITEA_HOME}/repositories
+DEFAULT_BRANCH = main
 
 [server]
-PROTOCOL        = http
-DOMAIN          = ${GITEA_DOMAIN}
-ROOT_URL        = ${GITEA_ROOT_URL}
-HTTP_ADDR       = 0.0.0.0
-HTTP_PORT       = ${GITEA_HTTP_PORT}
-SSH_DOMAIN      = ${GITEA_DOMAIN}
-SSH_PORT        = ${GITEA_SSH_PORT}
-SSH_LISTEN_PORT = ${GITEA_SSH_PORT}
+PROTOCOL         = http
+DOMAIN           = ${GITEA_DOMAIN}
+ROOT_URL         = ${GITEA_ROOT_URL}
+HTTP_ADDR        = 0.0.0.0
+HTTP_PORT        = ${GITEA_HTTP_PORT}
+SSH_DOMAIN       = ${GITEA_DOMAIN}
+SSH_PORT         = ${GITEA_SSH_PORT}
+SSH_LISTEN_PORT  = ${GITEA_SSH_PORT}
 START_SSH_SERVER = true
-OFFLINE_MODE     = false
 LANDING_PAGE     = explore
 
 [database]
-DB_TYPE         = postgres
-HOST            = ${GITEA_DB_HOST}
-NAME            = ${GITEA_DB_NAME}
-USER            = ${GITEA_DB_USER}
-PASSWD          = ${GITEA_DB_PASSWORD}
-SSL_MODE        = disable
-LOG_SQL         = false
+DB_TYPE  = postgres
+HOST     = ${GITEA_DB_HOST}
+NAME     = ${GITEA_DB_NAME}
+USER     = ${GITEA_DB_USER}
+PASSWD   = ${GITEA_DB_PASSWORD}
+SSL_MODE = disable
 
 [security]
-INSTALL_LOCK          = true
-SECRET_KEY            = ${secret_key}
-INTERNAL_TOKEN        = $(openssl rand -base64 36 | tr -d '/+=')
-PASSWORD_HASH_ALGO    = pbkdf2
-MIN_PASSWORD_LENGTH   = 8
+INSTALL_LOCK       = true
+SECRET_KEY         = ${secret_key}
+INTERNAL_TOKEN     = $(openssl rand -base64 36 | tr -d '/+=')
+PASSWORD_HASH_ALGO = pbkdf2
 
 [service]
-DISABLE_REGISTRATION  = false
-REQUIRE_SIGNIN_VIEW   = false
-REGISTER_EMAIL_CONFIRM = false
-ENABLE_NOTIFY_MAIL    = false
-DEFAULT_KEEP_EMAIL_PRIVATE = false
-NO_REPLY_ADDRESS      = noreply.${GITEA_DOMAIN}
-
-[mailer]
-ENABLED         = false
+DISABLE_REGISTRATION        = false
+REQUIRE_SIGNIN_VIEW         = false
+REGISTER_EMAIL_CONFIRM      = false
+ENABLE_NOTIFY_MAIL          = false
+DEFAULT_KEEP_EMAIL_PRIVATE  = false
 
 [session]
-PROVIDER        = db
-
-[picture]
-DISABLE_GRAVATAR        = false
-ENABLE_FEDERATED_AVATAR = true
+PROVIDER = db
 
 [log]
-MODE            = file
-LEVEL           = Info
-ROOT_PATH       = ${GITEA_HOME}/log
+MODE      = file
+LEVEL     = Info
+ROOT_PATH = ${GITEA_HOME}/log
 
 [actions]
-ENABLED         = true
-DEFAULT_ACTIONS_URL = https://github.com
+ENABLED = true
+DEFAULT_ACTIONS_URL = github
 
 [other]
 SHOW_FOOTER_VERSION = true
@@ -1041,7 +1038,16 @@ start_services() {
         progress "$retry" "$max_retry" "等待启动"
     done
 
-    warn "Gitea 启动超时，请检查日志: journalctl -u gitea -f"
+    warn "Gitea 启动超时或失败!"
+    echo ""
+    echo -e "  ${C[YD]}┌─── 最近日志 (journalctl) ──────────────────────────────────────┐${C[NC]}"
+    journalctl -u gitea --no-pager -n 15 2>/dev/null | while IFS= read -r line; do
+        echo -e "  ${C[W]}│${C[NC]} $line"
+    done || true
+    echo -e "  ${C[YD]}└──────────────────────────────────────────────────────────────────┘${C[NC]}"
+    echo ""
+    info "常见原因: 数据库连接失败 / 端口冲突 / 配置文件权限"
+    info "手动排查: journalctl -u gitea -f"
 }
 
 start_caddy() {
@@ -1120,7 +1126,7 @@ show_status() {
     echo ""
     draw_box_top
     draw_box_line "📊 Gitea 服务状态" "${C[YD]}"
-    draw_box_line "$(printf '%*s' 67 | tr ' ' '-')"
+    draw_divider
 
     # Gitea 状态
     local gitea_status="未运行"
@@ -1164,11 +1170,11 @@ show_status() {
     draw_box_line "Caddy (HTTPS):  ${caddy_status}"
 
     # 访问地址
-    draw_box_line ""
+    draw_divider
     if [ "$CADDY_ENABLED" = "true" ] && [ -n "$CADDY_DOMAIN" ]; then
-        draw_box_line "🌐 访问地址: ${C[YD]}https://${CADDY_DOMAIN}${C[W]}"
+        draw_box_line "🌐 https://${CADDY_DOMAIN}" "${C[YD]}"
     else
-        draw_box_line "🌐 访问地址: ${C[YD]}http://${GITEA_DOMAIN}:${GITEA_HTTP_PORT}/${C[W]}"
+        draw_box_line "🌐 http://${GITEA_DOMAIN}:${GITEA_HTTP_PORT}/" "${C[YD]}"
     fi
 
     draw_box_bottom
