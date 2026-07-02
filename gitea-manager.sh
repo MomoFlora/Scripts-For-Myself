@@ -87,6 +87,20 @@ _log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [${level}] ${msg}" >> "$LOG_FILE"
 }
 
+# 交互式输入 — 始终从 /dev/tty 读取，兼容 curl | bash 管道模式
+# 用法: ask "提示文本" "默认值"  → 输出用户输入到 stdout
+ask() {
+    local prompt_text="$1" default="$2" input
+    printf "%b" "$prompt_text" > /dev/tty
+    if ! read -r input < /dev/tty 2>/dev/null; then
+        # 非交互环境（无 /dev/tty）— 返回默认值
+        printf '%s' "$default"
+        return 0
+    fi
+    [ -z "$input" ] && input="$default"
+    printf '%s' "$input"
+}
+
 # ══════════════════════════════════════════════════════════════════════════════════
 # 输出美化函数
 # ══════════════════════════════════════════════════════════════════════════════════
@@ -291,7 +305,7 @@ prompt_domain() {
 
     # 交互式输入域名
     while true; do
-        read -rp $'  \033[1;36m请输入域名 (留空跳过反代配置): \033[0m' user_domain
+        user_domain=$(ask $'  \033[1;36m请输入域名 (留空跳过反代配置): \033[0m' "")
 
         if [ -z "$user_domain" ]; then
             echo ""
@@ -323,7 +337,7 @@ prompt_domain() {
     draw_box_bottom
     echo ""
 
-    read -rp $'  \033[1;33m确认以上配置? [Y/n]: \033[0m' confirm
+    confirm=$(ask $'  \033[1;33m确认以上配置? [Y/n]: \033[0m' "y")
     if [ "${confirm,,}" = "n" ] || [ "${confirm,,}" = "no" ]; then
         warn "已取消，请重新输入"
         CADDY_ENABLED="false"
@@ -930,7 +944,7 @@ RUNNER_LABELS="${ACTIONS_RUNNER_LABELS:-ubuntu-latest:docker://node:20-bullseye}
 echo "请在 Gitea 管理后台获取 Runner Token:"
 echo "  Site Administration → Actions → Runners → Create new Runner"
 echo ""
-read -rp "请输入 Runner Registration Token: " TOKEN
+read -rp "请输入 Runner Registration Token: " TOKEN < /dev/tty
 
 if [ -z "$TOKEN" ]; then
     echo "错误: Token 不能为空"
@@ -1310,7 +1324,7 @@ full_install() {
         local cur_ver
         cur_ver=$("$GITEA_BIN" --version 2>/dev/null | head -1 || echo "unknown")
         info "当前版本: $cur_ver"
-        read -rp $'  \033[1;33m是否重新安装/覆盖? [y/N]: \033[0m' confirm
+        confirm=$(ask $'  \033[1;33m是否重新安装/覆盖? [y/N]: \033[0m' "n")
         if [ "${confirm,,}" != "y" ] && [ "${confirm,,}" != "yes" ]; then
             info "已取消安装"
             show_status
@@ -1431,7 +1445,7 @@ do_uninstall() {
     echo -e "${C[NC]}"
     echo ""
     echo -e "  ${C[R]}此操作将删除 Gitea、配置文件和数据库!${C[NC]}"
-    read -rp "  请输入 'DELETE' 确认卸载: " confirm
+    confirm=$(ask "  请输入 'DELETE' 确认卸载: " "")
     if [ "$confirm" != "DELETE" ]; then
         info "已取消"
         exit 0
