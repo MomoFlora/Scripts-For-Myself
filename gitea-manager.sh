@@ -191,75 +191,89 @@ install_postgresql() {
         return 1
     fi
 
-    # --- 生成密码 ---
+    # --- 生成/恢复密码 ---
     if [ -z "$PG_PWD" ]; then
         PG_PWD="$(openssl rand -base64 24 | tr -d '/+=')"
     fi
 
-    # --- 获取 pg_hba.conf 路径 ---
+    # --- 清理旧的数据库状态 (如果用户要求重装) ---
     local HBA; HBA="$(su - postgres -c "psql -t -c 'SHOW hba_file;'" 2>/dev/null | tr -d ' ')" || true
     LOG_DBG "pg_hba.conf = ${HBA}"
 
-    # --- 创建角色 & 数据库 ---
-    LOG_OUT "创建用户 ${PG_USR} 和数据库 ${PG_DB} ..."
+    # --- 先尝试用当前密码连接 ---
+    local need_reset=false
+    if ! PGPASSWORD="$PG_PWD" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USR" -d "$PG_DB" -c "SELECT 1;" &>/dev/null; then
+        # 连接失败 — 可能是旧安装残留，重建角色和数据库
+        LOG_WARN "无法用当前密码连接数据库，重新创建用户和数据库 ..."
+        su - postgres -c "psql -q -c 'DROP DATABASE IF EXISTS ${PG_DB};'" 2>/dev/null || true
+        su - postgres -c "psql -q -c 'DROP ROLE IF EXISTS ${PG_USR};'" 2>/dev/null || true
+        need_reset=true
+    fi
 
-    su - postgres -c "psql -q -tc \"SELECT 1 FROM pg_roles WHERE rolname='${PG_USR}'\"" 2>/dev/null | grep -q 1 || {
+    # --- 创建角色 (强制设密码) ---
+    if [ "$need_reset" = true ] || ! su - postgres -c "psql -q -tc \"SELECT 1 FROM pg_roles WHERE rolname='${PG_USR}'\"" 2>/dev/null | grep -q 1; then
+        LOG_OUT "创建角色 ${PG_USR} ..."
         su - postgres -c "psql -q -c \"SET password_encryption='scram-sha-256'; CREATE ROLE ${PG_USR} LOGIN PASSWORD '${PG_PWD}';\""
-    }
+    else
+        # 角色存在但密码可能不匹配 — 强制更新密码
+        LOG_OUT "更新角色 ${PG_USR} 密码 ..."
+        su - postgres -c "psql -q -c \"ALTER ROLE ${PG_USR} LOGIN PASSWORD '${PG_PWD}';\""
+    fi
 
-    su - postgres -c "psql -q -tc \"SELECT 1 FROM pg_database WHERE datname='${PG_DB}'\"" 2>/dev/null | grep -q 1 || {
+    # --- 创建数据库 ---
+    if ! su - postgres -c "psql -q -tc \"SELECT 1 FROM pg_database WHERE datname='${PG_DB}'\"" 2>/dev/null | grep -q 1; then
+        LOG_OUT "创建数据库 ${PG_DB} ..."
         su - postgres -c "psql -q -c \"CREATE DATABASE ${PG_DB} OWNER ${PG_USR} ENCODING 'UTF8' LC_COLLATE='en_US.UTF-8' LC_CTYPE='en_US.UTF-8' TEMPLATE template0;\""
-    }
+    fi
 
     su - postgres -c "psql -q -c 'GRANT ALL PRIVILEGES ON DATABASE ${PG_DB} TO ${PG_USR};'" 2>/dev/null
     su - postgres -c "psql -q -c 'GRANT ALL ON SCHEMA public TO ${PG_USR};' -d ${PG_DB}" 2>/dev/null || true
 
-    # --- pg_hba.conf: 插入规则到文件头部 (first-match 策略) ---
+    # --- pg_hba.conf: 重建文件 — gitea 规则放最前面 ---
     if [ -n "$HBA" ] && [ -f "$HBA" ]; then
-        if ! grep -qF "gitea" "$HBA" 2>/dev/null; then
-            LOG_OUT "配置 pg_hba.conf (scram-sha-256 · 行首插入) ..."
-            cp "$HBA" "${HBA}.bak.$(date +%Y%m%d%H%M%S)"
-            # 直接写入新规则到临时文件，然后拼接原内容
-            local tmp_hba; tmp_hba="$(mktemp)"
-            {
-                printf "# Gitea — gitea-manager v%s\n" "$VER"
-                printf "host    %-12s %-12s 127.0.0.1/32    scram-sha-256\n" "$PG_DB" "$PG_USR"
-                printf "host    %-12s %-12s ::1/128         scram-sha-256\n" "$PG_DB" "$PG_USR"
-                printf "\n"
-                cat "$HBA"
-            } > "$tmp_hba"
-            mv "$tmp_hba" "$HBA"
-            chown postgres:postgres "$HBA"
-            chmod 640 "$HBA"
-        else
-            LOG_DBG "pg_hba.conf 中已有 gitea 规则"
+        # 总是重建 pg_hba.conf 以确保规则在最前面
+        if grep -qF "gitea" "$HBA" 2>/dev/null; then
+            LOG_OUT "pg_hba.conf 中已有旧 gitea 规则，清理并重建 ..."
+            # 删除旧 gitea 行
+            sed -i '/gitea/d' "$HBA"
+            sed -i '/^$/N;/^\n$/d' "$HBA"   # 清理空行
         fi
 
-        # reload
+        LOG_OUT "配置 pg_hba.conf (scram-sha-256 · 行首) ..."
+        cp "$HBA" "${HBA}.bak.$(date +%Y%m%d%H%M%S)"
+        local tmp_hba; tmp_hba="$(mktemp)"
+        {
+            printf "# Gitea — gitea-manager v%s\n" "$VER"
+            printf "host    %-12s %-12s 127.0.0.1/32    scram-sha-256\n" "$PG_DB" "$PG_USR"
+            printf "host    %-12s %-12s ::1/128         scram-sha-256\n" "$PG_DB" "$PG_USR"
+            printf "\n"
+            cat "$HBA"
+        } > "$tmp_hba"
+        mv "$tmp_hba" "$HBA"
+        chown postgres:postgres "$HBA"
+        chmod 640 "$HBA"
+
         systemctl reload postgresql 2>/dev/null || \
             su - postgres -c "pg_ctl reload -D /var/lib/postgresql/*/main/" 2>/dev/null || true
         sleep 1
     else
-        LOG_ERROR "找不到 pg_hba.conf!"
-        return 1
+        LOG_ERROR "找不到 pg_hba.conf!"; return 1
     fi
 
     # --- 连接验证 ---
-    LOG_OUT "验证数据库连接 ..."
+    LOG_OUT "验证数据库连接 (${PG_USR}@${PG_HOST}:${PG_PORT}/${PG_DB}) ..."
     if PGPASSWORD="$PG_PWD" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USR" -d "$PG_DB" -c "SELECT 1 AS connected;" &>/dev/null; then
         LOG_OK "数据库连接验证通过"
     else
-        LOG_ERROR "数据库连接失败! 尝试诊断 ..."
-        LOG_OUT "pg_hba.conf 当前规则 (前10行):"
-        head -10 "$HBA" | while IFS= read -r line; do
+        LOG_ERROR "数据库连接失败!"
+        LOG_OUT "pg_hba.conf 当前内容 (不含注释):"
+        grep -v '^#' "$HBA" | grep -v '^$' | head -10 | while IFS= read -r line; do
             printf "          ${CLR_DIM}%s${CLR_RST}\n" "$line"
         done
-        LOG_OUT "尝试直接连接 (含错误信息):"
+        LOG_OUT "直接连接测试 (查看完整错误):"
         PGPASSWORD="$PG_PWD" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USR" -d "$PG_DB" -c "SELECT 1;" 2>&1 | while IFS= read -r line; do
             printf "          ${CLR_RED}%s${CLR_RST}\n" "$line"
         done || true
-        LOG_WARN "请检查 pg_hba.conf 中第一条匹配规则的认证方式"
-        LOG_WARN "需要: host ${PG_DB} ${PG_USR} 127.0.0.1/32 scram-sha-256 在文件最前面"
     fi
 }
 
@@ -546,45 +560,50 @@ start_services() {
         sleep 2
     fi
 
-    # --- Gitea: 先做一次快速验证 ---
-    LOG_OUT "验证 Gitea 配置 ..."
-    local err; err="$(timeout 8 su -s /bin/bash "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} web --config ${GT_CFG}" 2>&1)" || true
-
-    if echo "$err" | grep -qiE "fail|error|panic|fatal|refused|unknown|invalid|permission"; then
-        LOG_ERROR "Gitea 启动失败，错误信息:"
-        printf "  ${CLR_RED}"
-        echo "$err" | head -20
-        printf "${CLR_RST}"
-
-        # 分类诊断
-        if echo "$err" | grep -qi "refused\|connect.*reject"; then
-            LOG_WARN "原因: PostgreSQL 连接被拒绝 — 检查 pg_hba.conf 和认证方式"
-        elif echo "$err" | grep -qi "authentication\|password\|scram\|md5"; then
-            LOG_WARN "原因: 数据库认证失败 — 检查密码和 pg_hba.conf"
-        elif echo "$err" | grep -qi "unknown.*section\|invalid.*config"; then
-            LOG_WARN "原因: 配置文件语法错误 — 检查 ${GT_CFG}"
-        elif echo "$err" | grep -qi "permission\|access.*denied"; then
-            LOG_WARN "原因: 文件权限错误 — 检查目录权限"
-        fi
-        LOG_OUT "运行手动诊断: su - ${GT_USR} -c 'GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} web --config ${GT_CFG}' | head -30"
-        return 1
-    fi
-
-    LOG_OK "Gitea 配置验证通过"
-
-    # --- 启动 Gitea ---
+    # --- Gitea ---
+    LOG_OUT "启动 Gitea ..."
+    systemctl stop gitea 2>/dev/null || true
+    systemctl reset-failed gitea 2>/dev/null || true
     systemctl restart gitea
-    LOG_OUT "等待 Gitea HTTP 就绪 ..."
 
+    # 等待并检测
     local retry=0 max=15
     while [ $retry -lt $max ]; do
-        if curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${GT_PORT}" 2>/dev/null | grep -qE "2[0-9]{2}|3[0-9]{2}|40[134]"; then
-            LOG_OK "Gitea 已就绪 → http://127.0.0.1:${GT_PORT}"
-            break
-        fi
         sleep 2; retry=$((retry+1))
-        [ $retry -eq $max ] && { LOG_ERROR "Gitea 启动超时"; return 1; }
+
+        # 先检查 systemd 状态
+        if systemctl is-active --quiet gitea 2>/dev/null; then
+            # 再检查 HTTP
+            if curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${GT_PORT}" 2>/dev/null | grep -qE "2[0-9]{2}|3[0-9]{2}|40[134]"; then
+                LOG_OK "Gitea 已就绪 → http://127.0.0.1:${GT_PORT}"
+                break
+            fi
+        fi
+
+        # 每 5 次检查一次 journalctl
+        if [ $((retry % 5)) -eq 0 ]; then
+            local jerr; jerr="$(journalctl -u gitea --no-pager -n 5 2>/dev/null | grep -iE 'error|fail|fatal|panic|refused' | tail -3 || true)"
+            if [ -n "$jerr" ]; then
+                echo ""
+                LOG_ERROR "Gitea 启动失败，日志显示:"
+                printf "  ${CLR_RED}%s${CLR_RST}\n" "$jerr"
+                break
+            fi
+        fi
     done
+
+    if ! systemctl is-active --quiet gitea 2>/dev/null; then
+        LOG_ERROR "Gitea 未能启动，完整日志:"
+        journalctl -u gitea --no-pager -n 25 2>/dev/null | while IFS= read -r line; do
+            printf "  ${CLR_DIM}%s${CLR_RST}\n" "$line"
+        done || true
+        echo ""
+        LOG_OUT "诊断提示:"
+        LOG_OUT "  1) 检查数据库连通: PGPASSWORD='***' psql -h ${PG_HOST} -p ${PG_PORT} -U ${PG_USR} -d ${PG_DB} -c 'SELECT 1;'"
+        LOG_OUT "  2) 检查配置文件: ${GT_BIN} web --config ${GT_CFG} 2>&1 | tail -20"
+        LOG_OUT "  3) 检查文件权限: ls -la ${GT_HOME}/ ${GT_CFG}"
+        return 1
+    fi
 
     # --- Caddy ---
     if [ "$CD_ENABLE" = "true" ]; then
