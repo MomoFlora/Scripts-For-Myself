@@ -560,8 +560,32 @@ start_services() {
         sleep 2
     fi
 
-    # --- Gitea ---
-    LOG_OUT "启动 Gitea ..."
+    # --- Gitea: doctor 诊断 ---
+    LOG_OUT "运行 gitea doctor 诊断 ..."
+    local doc; doc="$(su -s /bin/bash "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} doctor --config ${GT_CFG} 2>&1")" || true
+    if echo "$doc" | grep -qiE "FAIL|ERROR|CRITICAL"; then
+        LOG_ERROR "Gitea doctor 发现严重问题:"
+        echo "$doc" | grep -iE "FAIL|ERROR|CRITICAL" | head -10 | while IFS= read -r l; do
+            printf "  ${CLR_RED}%s${CLR_RST}\n" "$l"
+        done
+    else
+        LOG_OK "Gitea doctor 检查通过"
+    fi
+
+    # --- Gitea: 前台测试 ---
+    LOG_OUT "前台测试 Gitea 启动 (捕获 stderr) ..."
+    local fg_out; fg_out="$(timeout 8 su -s /bin/bash "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} web --config ${GT_CFG}" 2>&1)" || true
+    # 过滤掉正常的 info/warn 行，只保留异常
+    local fg_err; fg_err="$(echo "$fg_out" | grep -vE '\[I\]|\[W\]|showWebStartupMessage|Prepare to run|Starting Gitea|Gitea version' || true)"
+    if [ -n "$fg_err" ]; then
+        LOG_OUT "Gitea 前台输出 (已过滤 INFO/WARN):"
+        echo "$fg_err" | head -20 | while IFS= read -r l; do
+            printf "  ${CLR_DIM}%s${CLR_RST}\n" "$l"
+        done
+    fi
+
+    # --- 启动 systemd 服务 ---
+    LOG_OUT "启动 Gitea systemd 服务 ..."
     systemctl stop gitea 2>/dev/null || true
     systemctl reset-failed gitea 2>/dev/null || true
     systemctl restart gitea
@@ -708,7 +732,15 @@ EOF
     chmod 600 "$SAVEFILE"
 }
 
-load_config()  { if [ -f "$SAVEFILE" ]; then source "$SAVEFILE"; fi; }
+load_config() {
+    if [ -f "$SAVEFILE" ]; then
+        source "$SAVEFILE"
+        # v1.x → v2.x 变量名兼容
+        [ -n "${GITEA_DB_PASSWORD:-}" ] && PG_PWD="${GITEA_DB_PASSWORD}"
+        [ -n "${GITEA_VERSION:-}" ]    && GT_VER="${GITEA_VERSION}"
+        [ -n "${GITEA_HTTP_PORT:-}" ]  && GT_PORT="${GITEA_HTTP_PORT}"
+    fi
+}
 
 show_summary() {
     echo ""
