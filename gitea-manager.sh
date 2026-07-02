@@ -652,9 +652,23 @@ start_services() {
 create_admin() {
     step "创建管理员账户"
 
-    if [ -z "$ADM_PWD" ]; then
-        ADM_PWD="$(openssl rand -base64 12 | tr -d '/+=')"
-    fi
+    # 让用户设置管理员信息
+    printf "\n"
+    ADM_USR="$(ask "  ${CLR_WHT}管理员用户名${CLR_RST} ${CLR_DIM}[gitea_admin]${CLR_RST}: " "gitea_admin")"
+    ADM_MAIL="$(ask "  ${CLR_WHT}管理员邮箱${CLR_RST}   ${CLR_DIM}[admin@${CD_DOMAIN:-example.com}]${CLR_RST}: " "admin@${CD_DOMAIN:-example.com}")"
+
+    while true; do
+        ADM_PWD="$(ask "  ${CLR_WHT}管理员密码${CLR_RST}   ${CLR_DIM}(至少 8 位，留空自动生成)${CLR_RST}: " "")"
+        if [ -z "$ADM_PWD" ]; then
+            ADM_PWD="$(openssl rand -base64 12 | tr -d '/+=')"
+            break
+        elif [ "${#ADM_PWD}" -lt 8 ]; then
+            LOG_WARN "密码至少 8 位，请重新输入"
+        else
+            break
+        fi
+    done
+    printf "\n"
 
     su - "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} admin user create \
         --admin --username '${ADM_USR}' --password '${ADM_PWD}' \
@@ -747,33 +761,39 @@ load_config() {
 }
 
 show_summary() {
-    echo ""
-    TITLE "部署完成"
-    echo ""
-
-    local gok="未运行"; systemctl is-active --quiet gitea 2>/dev/null     && gok="${CLR_GRN}● 运行中${CLR_RST}"
-    local pok="未运行"; systemctl is-active --quiet postgresql 2>/dev/null && pok="${CLR_GRN}● 运行中${CLR_RST}"
-    local cok="未配置"
-    [ "$CD_ENABLE" = "true" ] && { systemctl is-active --quiet caddy 2>/dev/null && cok="${CLR_GRN}● 运行中${CLR_RST}" || cok="${CLR_RED}○ 停止${CLR_RST}"; }
-
-    printf "  %-18s %-16s %-16s %s\n" "服务" "状态" "版本" "端口"
-    SEP
-    printf "  %-18s %b%-16s${CLR_RST} %-16s %s\n" \
-        "Gitea" "$gok" "v${GT_VER}" "${GT_PORT}"
-    printf "  %-18s %b%-16s${CLR_RST} %-16s %s\n" \
-        "PostgreSQL" "$pok" "$(psql --version 2>/dev/null | awk '{print $NF}' || echo '?')" "${PG_PORT}"
-    printf "  %-18s %b%-16s${CLR_RST} %-16s %s\n" \
-        "Caddy" "$cok" "$(caddy version 2>/dev/null | head -1 || echo 'N/A')" "80/443"
+    # 从配置文件读取实际使用的域名/IP
+    local domain; domain="$(grep -oP '^\s*DOMAIN\s*=\s*\K.*' "$GT_CFG" 2>/dev/null | tr -d ' ' || echo "?")"
+    local proto="http"
+    [ "$CD_ENABLE" = "true" ] && [ -n "$CD_DOMAIN" ] && proto="https"
 
     echo ""
-    if [ "$CD_ENABLE" = "true" ] && [ -n "$CD_DOMAIN" ]; then
-        printf "  ${CLR_BLD}地址:${CLR_RST}  ${CLR_CYN}https://%s${CLR_RST}\n" "$CD_DOMAIN"
-    else
-        printf "  ${CLR_BLD}地址:${CLR_RST}  ${CLR_CYN}http://%s:%s${CLR_RST}\n" \
-            "$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost')" "$GT_PORT"
+    printf "  ${CLR_BLD}%s${CLR_RST}\n" "$(printf '%*s' 56 '' | tr ' ' '═')"
+    printf "  ${CLR_GRN}  ✓  部署完成${CLR_RST}\n\n"
+
+    local gok="${CLR_RED}○ 停止${CLR_RST}"
+    systemctl is-active --quiet gitea 2>/dev/null && gok="${CLR_GRN}● 运行${CLR_RST}"
+    printf "  %-14s %b  ${CLR_DIM}v%s${CLR_RST}\n" "Gitea" "$gok" "${GT_VER}"
+
+    local pok="${CLR_RED}○ 停止${CLR_RST}"
+    systemctl is-active --quiet postgresql 2>/dev/null && pok="${CLR_GRN}● 运行${CLR_RST}"
+    printf "  %-14s %b  ${CLR_DIM}%s${CLR_RST}\n" "PostgreSQL" "$pok" "$(psql --version 2>/dev/null | awk '{print $NF}' || echo '?')"
+
+    if [ "$CD_ENABLE" = "true" ]; then
+        local cok="${CLR_RED}○ 停止${CLR_RST}"
+        systemctl is-active --quiet caddy 2>/dev/null && cok="${CLR_GRN}● 运行${CLR_RST}"
+        printf "  %-14s %b\n" "Caddy" "$cok"
     fi
-    printf "  ${CLR_BLD}管理员:${CLR_RST} %-16s ${CLR_DIM}密码: %s${CLR_RST}\n" "$ADM_USR" "$ADM_PWD"
-    printf "  ${CLR_DIM}密码已保存到: %s${CLR_RST}\n" "$SAVEFILE"
+
+    printf "\n  ${CLR_BLD}访问地址${CLR_RST}\n"
+    printf "  ${CLR_CYN}%s://%s${CLR_RST}" "$proto" "$domain"
+    [ "$proto" = "http" ] && printf ":${GT_PORT}"
+    printf "\n"
+
+    printf "\n  ${CLR_BLD}管理员${CLR_RST}\n"
+    printf "  ${CLR_DIM}用户${CLR_RST}  %s\n" "$ADM_USR"
+    printf "  ${CLR_DIM}密码${CLR_RST}  ${CLR_WHT}%s${CLR_RST}\n" "$ADM_PWD"
+    printf "  ${CLR_DIM}存档${CLR_RST}  %s\n" "$SAVEFILE"
+    printf "\n  ${CLR_BLD}%s${CLR_RST}\n" "$(printf '%*s' 56 '' | tr ' ' '═')"
     echo ""
 }
 
@@ -794,11 +814,10 @@ cmd_install() {
     fi
 
     clear 2>/dev/null || true
-    SEP
-    printf "  ${CLR_BLD}Gitea Tools Manager${CLR_RST}  ${CLR_DIM}v%s${CLR_RST}\n" "$VER"
-    printf "  ${CLR_CYN}Gitea · Caddy · PostgreSQL · Actions${CLR_RST}  ${CLR_DIM}—  一键部署${CLR_RST}\n"
-    SEP
-    printf "\n  Gitea  ·  Caddy HTTPS  ·  PostgreSQL  ·  Docker  ·  Actions Runner\n\n"
+    printf "\n"
+    printf "  ${CLR_BLD}Gitea Tools Manager${CLR_RST} ${CLR_DIM}v%s${CLR_RST}\n" "$VER"
+    printf "  ${CLR_DIM}Gitea · Caddy · PostgreSQL · Actions Runner${CLR_RST}\n"
+    printf "\n"
 
     STEPS=10
 
