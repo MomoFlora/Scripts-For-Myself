@@ -709,24 +709,83 @@ setup_runner() {
         LOG_WARN "gitea-runner 下载失败"; return 0
     fi
 
-    # 自动生成 Runner token 并注册
+    # 创建 .runner 目录
+    mkdir -p "${GT_HOME}/.runner"
+
+    # 创建注册脚本 (手动备用)
+    cat > "${GT_HOME}/register-runner.sh" << REGSCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+echo "=== Gitea Actions Runner 注册 ==="
+echo ""
+INSTANCE="http://localhost:${GT_PORT}"
+echo "Gitea 地址: \$INSTANCE"
+
+# 尝试自动获取 token
+TOKEN=\$(su -s /bin/bash ${GT_USR} -c "GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} --config ${GT_CFG} actions generate-runner-token 2>/dev/null" 2>/dev/null || true)
+if [ -n "\$TOKEN" ]; then
+    echo "Token: \$TOKEN"
+else
+    echo "请在 Gitea 后台获取 Runner Token:"
+    echo "  \${INSTANCE}/-/admin/actions/runners"
+    printf "Token: "
+    read -r TOKEN < /dev/tty
+fi
+
+[ -z "\$TOKEN" ] && { echo "Token 不能为空"; exit 1; }
+echo ""
+echo "注册中..."
+exec /usr/local/bin/gitea-runner register --no-interactive \
+    --instance "\$INSTANCE" --token "\$TOKEN" \
+    --name "runner-\$(hostname)" \
+    --labels "ubuntu-latest:docker://node:20-bullseye,ubuntu-22.04:docker://catthehacker/ubuntu:act-22.04"
+REGSCRIPT
+    chmod +x "${GT_HOME}/register-runner.sh"
+
+    # 尝试自动注册
     LOG_OUT "注册 Actions Runner ..."
-    local token; token="$(su -s /bin/bash "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} --config ${GT_CFG} actions generate-runner-token 2>/dev/null" || true)"
-    if [ -z "$token" ]; then
-        LOG_WARN "无法自动获取 Runner token，请手动注册"
-        LOG_OUT "手动注册: /usr/local/bin/gitea-runner register --instance http://localhost:${GT_PORT}"
-        return 0
+    local token; token="$(su -s /bin/bash "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} --config ${GT_CFG} actions generate-runner-token" 2>&1 | tail -1 | tr -d '[:space:]')" || true
+    if [ -n "$token" ] && [ ${#token} -gt 8 ]; then
+        if su -s /bin/bash "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} /usr/local/bin/gitea-runner register \
+            --no-interactive \
+            --instance http://localhost:${GT_PORT} \
+            --token '${token}' \
+            --name 'runner-$(hostname)' \
+            --labels 'ubuntu-latest:docker://node:20-bullseye,ubuntu-22.04:docker://catthehacker/ubuntu:act-22.04'" 2>/dev/null; then
+            LOG_OK "Runner 注册成功"
+        else
+            LOG_WARN "Runner 注册失败，请手动注册: ${GT_HOME}/register-runner.sh"
+        fi
+    else
+        LOG_WARN "无法自动获取 Token，请手动注册: ${GT_HOME}/register-runner.sh"
     fi
 
-    su -s /bin/bash "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} /usr/local/bin/gitea-runner register \
-        --no-interactive \
-        --instance http://localhost:${GT_PORT} \
-        --token '${token}' \
-        --name 'runner-$(hostname)' \
-        --labels 'ubuntu-latest:docker://node:20-bullseye,ubuntu-22.04:docker://catthehacker/ubuntu:act-22.04'" 2>/dev/null && \
-        LOG_OK "Runner 注册成功" || LOG_WARN "Runner 注册失败"
-
     chown -R "${GT_USR}:${GT_USR}" "${GT_HOME}/.runner" 2>/dev/null || true
+
+    # 创建 systemd 服务 (注册后运行)
+    cat > /etc/systemd/system/gitea-runner.service << RUNSVC
+[Unit]
+Description=Gitea Actions Runner
+After=gitea.service docker.service
+Wants=gitea.service docker.service
+ConditionPathExists=${GT_HOME}/.runner/.runner
+
+[Service]
+Type=simple
+User=${GT_USR}
+Group=${GT_USR}
+WorkingDirectory=${GT_HOME}
+ExecStart=/usr/local/bin/gitea-runner daemon
+Restart=always
+RestartSec=5s
+Environment=HOME=${GT_HOME}
+
+[Install]
+WantedBy=multi-user.target
+RUNSVC
+    systemctl daemon-reload
+    systemctl enable gitea-runner 2>/dev/null || true
+    LOG_OUT "Runner 服务已创建 (注册后自动启动)"
 }
 
 #===============================================================================
@@ -854,7 +913,7 @@ cmd_uninstall() {
     systemctl disable gitea gitea-actions-runner caddy 2>/dev/null || true
     rm -f /etc/systemd/system/gitea.service /etc/systemd/system/gitea-actions-runner.service
     systemctl daemon-reload
-    rm -f "$GT_BIN" /usr/local/bin/act_runner
+    rm -f "$GT_BIN" /usr/local/bin/gitea-runner /usr/local/bin/act_runner
     rm -rf "$GT_HOME" /etc/gitea /etc/caddy/Caddyfile
     rm -f "$SAVEFILE" "$LOGFILE"
     su - postgres -c "psql -q -c 'DROP DATABASE IF EXISTS ${PG_DB};'" 2>/dev/null || true
