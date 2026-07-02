@@ -405,7 +405,10 @@ generate_gitea_config() {
     if [ "$CD_ENABLE" = "true" ] && [ -n "$CD_DOMAIN" ]; then
         domain="$CD_DOMAIN"; root_url="https://${CD_DOMAIN}/"
     else
-        domain="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost')"
+        # 未配置 Caddy — 让用户输入公网IP或域名
+        local pub; pub="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost')"
+        LOG_OUT "当前检测到的内网IP: ${pub}"
+        domain="$(ask "  ${CLR_WHT}请输入服务器公网IP或域名 (用于生成 Clone URL):${CLR_RST} " "$pub")"
         root_url="http://${domain}:${GT_PORT}/"
     fi
     ADM_MAIL="${ADM_MAIL:-admin@${domain}}"
@@ -431,8 +434,8 @@ ROOT_URL         = ${root_url}
 HTTP_ADDR        = 0.0.0.0
 HTTP_PORT        = ${GT_PORT}
 SSH_DOMAIN       = ${domain}
-SSH_PORT         = 22
-SSH_LISTEN_PORT  = 22
+SSH_PORT         = 2222
+SSH_LISTEN_PORT  = 2222
 START_SSH_SERVER = true
 LANDING_PAGE     = explore
 
