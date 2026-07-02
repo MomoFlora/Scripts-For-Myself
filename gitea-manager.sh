@@ -97,7 +97,7 @@ ask() {
         printf '%s' "$default"
         return 0
     fi
-    [ -z "$input" ] && input="$default"
+    if [ -z "$input" ]; then input="$default"; fi
     printf '%s' "$input"
 }
 
@@ -897,7 +897,7 @@ setup_actions_runner() {
     if [ "$runner_version" = "latest" ]; then
         runner_version=$(curl -sSL https://gitea.com/api/v1/repos/gitea/act_runner/releases/latest \
             | grep -oP '"tag_name":\s*"\K[^"]+' | sed 's/^v//')
-        [ -z "$runner_version" ] && runner_version="0.2.11"
+        if [ -z "$runner_version" ]; then runner_version="0.2.11"; fi
     fi
 
     # 架构映射
