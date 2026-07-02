@@ -203,9 +203,9 @@ install_postgresql() {
     # --- 先尝试用当前密码连接 ---
     local need_reset=false
     if ! PGPASSWORD="$PG_PWD" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USR" -d "$PG_DB" -c "SELECT 1;" &>/dev/null; then
-        # 连接失败 — 可能是旧安装残留，重建角色和数据库
-        LOG_WARN "无法用当前密码连接数据库，重新创建用户和数据库 ..."
-        su - postgres -c "psql -q -c 'DROP DATABASE IF EXISTS ${PG_DB};'" 2>/dev/null || true
+        LOG_WARN "无法用当前密码连接数据库，重置用户和数据库 ..."
+        su - postgres -c "psql -q -c 'DROP DATABASE IF EXISTS ${PG_DB} WITH (FORCE);'" 2>/dev/null || true
+        su - postgres -c "psql -q -c 'DROP OWNED BY ${PG_USR} CASCADE;'" 2>/dev/null || true
         su - postgres -c "psql -q -c 'DROP ROLE IF EXISTS ${PG_USR};'" 2>/dev/null || true
         need_reset=true
     fi
@@ -213,9 +213,8 @@ install_postgresql() {
     # --- 创建角色 (强制设密码) ---
     if [ "$need_reset" = true ] || ! su - postgres -c "psql -q -tc \"SELECT 1 FROM pg_roles WHERE rolname='${PG_USR}'\"" 2>/dev/null | grep -q 1; then
         LOG_OUT "创建角色 ${PG_USR} ..."
-        su - postgres -c "psql -q -c \"SET password_encryption='scram-sha-256'; CREATE ROLE ${PG_USR} LOGIN PASSWORD '${PG_PWD}';\""
+        su - postgres -c "psql -q -c \"SET password_encryption='scram-sha-256'; CREATE ROLE ${PG_USR} LOGIN PASSWORD '${PG_PWD}';\"" 2>/dev/null
     else
-        # 角色存在但密码可能不匹配 — 强制更新密码
         LOG_OUT "更新角色 ${PG_USR} 密码 ..."
         su - postgres -c "psql -q -c \"ALTER ROLE ${PG_USR} LOGIN PASSWORD '${PG_PWD}';\""
     fi
