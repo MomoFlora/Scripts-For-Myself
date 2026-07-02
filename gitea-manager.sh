@@ -107,18 +107,12 @@ ask() {
 
 banner() {
     clear 2>/dev/null || true
-    echo -e "${C[BD]}"
-    echo "  ██████╗ ██╗████████╗███████╗ █████╗ "
-    echo " ██╔════╝ ██║╚══██╔══╝██╔════╝██╔══██╗"
-    echo " ██║  ███╗██║   ██║   █████╗  ███████║"
-    echo " ██║   ██║██║   ██║   ██╔══╝  ██╔══██║"
-    echo " ╚██████╔╝██║   ██║   ███████╗██║  ██║"
-    echo "  ╚═════╝ ╚═╝   ╚═╝   ╚══════╝╚═╝  ╚═╝"
-    echo -e "${C[NC]}"
-    echo -e "${C[CD]}  Tools Manager ${C[W]}v${VERSION}"
-    echo -e "${C[CD]}  Gitea + Caddy 反代 + Actions + PostgreSQL 一键部署"
-    echo -e "${C[NC]}"
-    draw_line "="
+    local cols; cols=$(tput cols 2>/dev/null || echo 80)
+    printf "${C[BD]}%*s${C[NC]}\n" "$cols" "" | tr ' ' '─'
+    printf "${C[BD]}  Gitea Tools Manager${C[NC]}  ${C[W]}v%s${C[NC]}\n" "$VERSION"
+    printf "${C[CD]}  Gitea · Caddy · PostgreSQL · Actions Runner  —  一键部署${C[NC]}\n"
+    printf "${C[BD]}%*s${C[NC]}\n" "$cols" "" | tr ' ' '─'
+    echo ""
 }
 
 draw_line() {
@@ -155,9 +149,8 @@ draw_divider() {
 step_header() {
     CURRENT_STEP=$((CURRENT_STEP + 1))
     echo ""
-    echo -e "${C[BD]}┌─ Step ${CURRENT_STEP}/${TOTAL_STEPS} ──────────────────────────────────────────────────────┐${C[NC]}"
-    echo -e "${C[BD]}│${C[NC]} ${C[YD]}▶ $1${C[NC]}"
-    echo -e "${C[BD]}└──────────────────────────────────────────────────────────────────────┘${C[NC]}"
+    printf "  ${C[BD]}[%02d/%02d]${C[NC]} ${C[YD]}%s${C[NC]}\n" "$CURRENT_STEP" "$TOTAL_STEPS" "$1"
+    printf "  ${C[BD]}%*s${C[NC]}\n" 60 "" | tr ' ' '─'
 }
 
 ok() {
@@ -263,33 +256,51 @@ detect_gpg_keyring() {
 # ─── 依赖检查 ───────────────────────────────────────────────────────────────────
 
 install_dependencies() {
-    step_header "安装系统依赖"
+    step_header "安装系统依赖 (curl git docker ...)"
 
-    local deps="curl wget tar gzip git gnupg openssl"
+    local deps="curl wget tar gzip git gnupg openssl ca-certificates"
 
     case "$OS" in
         debian)
             info "更新 apt 源..."
             apt-get update -qq 2>/dev/null
-            info "安装依赖包..."
-            apt-get install -y -qq $deps ca-certificates 2>/dev/null
+            info "安装基础依赖..."
+            apt-get install -y -qq $deps 2>/dev/null
+            info "安装 Docker..."
+            if ! command -v docker &>/dev/null; then
+                apt-get install -y -qq docker.io docker-compose 2>/dev/null || \
+                    curl -fsSL https://get.docker.com | bash -s 2>/dev/null
+            else
+                ok "Docker 已安装 — 跳过"
+            fi
             ;;
         rhel)
             if command -v dnf &>/dev/null; then
-                dnf install -y -q $deps ca-certificates 2>/dev/null
+                dnf install -y -q $deps 2>/dev/null
             else
-                yum install -y -q $deps ca-certificates 2>/dev/null
+                yum install -y -q $deps 2>/dev/null
+            fi
+            if ! command -v docker &>/dev/null; then
+                dnf install -y -q docker docker-compose 2>/dev/null || \
+                    curl -fsSL https://get.docker.com | bash -s 2>/dev/null
             fi
             ;;
         arch)
-            pacman -S --noconfirm --needed $deps ca-certificates 2>/dev/null
+            pacman -S --noconfirm --needed $deps docker docker-compose 2>/dev/null
             ;;
         *)
             warn "未知系统，请手动安装依赖: $deps"
             ;;
     esac
 
-    ok "依赖安装完成"
+    # 启动 Docker
+    if command -v docker &>/dev/null; then
+        systemctl enable docker 2>/dev/null || true
+        systemctl start docker 2>/dev/null || true
+        ok "Docker $(docker --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || echo '') 已就绪"
+    fi
+
+    ok "系统依赖安装完成"
 }
 
 # ─── Caddy 反代 & 域名配置 ────────────────────────────────────────────────────────
@@ -600,7 +611,7 @@ configure_postgresql() {
     # 切换为 postgres 用户执行 SQL
     su - postgres -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='${GITEA_DB_USER}'\" 2>/dev/null" \
         | grep -q 1 || {
-        su - postgres -c "psql -c \"CREATE ROLE ${GITEA_DB_USER} WITH LOGIN PASSWORD '${GITEA_DB_PASSWORD}';\""
+        su - postgres -c "psql -c \"SET password_encryption = 'scram-sha-256'; CREATE ROLE ${GITEA_DB_USER} WITH LOGIN PASSWORD '${GITEA_DB_PASSWORD}';\""
     }
 
     # 创建数据库
@@ -620,8 +631,8 @@ configure_postgresql() {
         if ! grep -q "gitea" "$pg_hba" 2>/dev/null; then
             info "更新 pg_hba.conf 认证策略..."
             echo "# Gitea access" >> "$pg_hba"
-            echo "host    ${GITEA_DB_NAME}    ${GITEA_DB_USER}    127.0.0.1/32    md5" >> "$pg_hba"
-            echo "host    ${GITEA_DB_NAME}    ${GITEA_DB_USER}    ::1/128         md5" >> "$pg_hba"
+            echo "host    ${GITEA_DB_NAME}    ${GITEA_DB_USER}    127.0.0.1/32    scram-sha-256" >> "$pg_hba"
+            echo "host    ${GITEA_DB_NAME}    ${GITEA_DB_USER}    ::1/128         scram-sha-256" >> "$pg_hba"
             systemctl reload postgresql 2>/dev/null || \
                 su - postgres -c "pg_ctl reload -D ${PG_DATA_DIR}" 2>/dev/null || true
         fi
@@ -857,31 +868,11 @@ setup_actions_runner() {
         return 0
     fi
 
-    # 安装 Docker (Actions Runner 需要)
     if ! command -v docker &>/dev/null; then
-        info "安装 Docker..."
-        case "$OS" in
-            debian)
-                apt-get install -y -qq docker.io docker-compose 2>/dev/null || \
-                    curl -fsSL https://get.docker.com | bash -s
-                ;;
-            rhel)
-                dnf install -y -q docker docker-compose 2>/dev/null || \
-                    curl -fsSL https://get.docker.com | bash -s
-                ;;
-            arch)
-                pacman -S --noconfirm --needed docker docker-compose 2>/dev/null
-                ;;
-            *)
-                curl -fsSL https://get.docker.com | bash -s 2>/dev/null
-                ;;
-        esac
-        systemctl enable docker 2>/dev/null || true
-        systemctl start docker 2>/dev/null || true
-        ok "Docker 安装完成"
-    else
-        ok "Docker 已安装"
+        warn "Docker 未安装 — Actions Runner 需要 Docker 环境"
+        return 0
     fi
+    ok "Docker 已就绪"
 
     # 将 gitea 用户加入 docker 组
     usermod -aG docker "$GITEA_USER" 2>/dev/null || true
@@ -1021,32 +1012,68 @@ start_services() {
     step_header "启动 Gitea 服务"
 
     info "启动 Gitea..."
+    systemctl stop gitea 2>/dev/null || true
+
+    # 先用 timeout 直接运行 gitea 验证配置，捕获启动错误
+    info "验证 Gitea 配置与数据库连接..."
+    local gitea_err
+    gitea_err=$(timeout 10 su -s /bin/bash "$GITEA_USER" -c "GITEA_WORK_DIR=${GITEA_WORK_DIR} ${GITEA_BIN} web --config ${GITEA_CONFIG}" 2>&1) || true
+
+    if echo "$gitea_err" | grep -qi "server started\|listening\|starting gitea on pid\|gracefully"; then
+        ok "Gitea 配置验证通过"
+    elif [ -n "$gitea_err" ]; then
+        # 检查是否有真正的错误
+        if echo "$gitea_err" | grep -qiE "fail|error|panic|fatal|refused|unknown|invalid"; then
+            error "Gitea 启动失败，错误信息:"
+            echo ""
+            echo -e "  ${C[R]}┌─── Gitea 启动错误 ────────────────────────────────────────────────┐${C[NC]}"
+            echo "$gitea_err" | head -20 | while IFS= read -r line; do
+                echo -e "  ${C[RD]}│${C[NC]} ${C[W]}$line${C[NC]}"
+            done
+            echo -e "  ${C[R]}└──────────────────────────────────────────────────────────────────────┘${C[NC]}"
+            echo ""
+
+            # 常见错误诊断
+            if echo "$gitea_err" | grep -qi "refused\|connect.*reject\|no route"; then
+                warn "诊断: PostgreSQL 连接被拒绝 — 检查数据库服务状态和 pg_hba.conf"
+            elif echo "$gitea_err" | grep -qi "authentication\|password\|scram\|md5"; then
+                warn "诊断: 数据库认证失败 — 检查密码和 pg_hba.conf 认证方式"
+            elif echo "$gitea_err" | grep -qi "unknown.*section\|invalid.*config\|parse.*error"; then
+                warn "诊断: 配置文件语法错误 — 检查 ${GITEA_CONFIG}"
+            elif echo "$gitea_err" | grep -qi "permission\|access.*denied\|EACCES"; then
+                warn "诊断: 文件权限错误 — 检查目录权限和 SELinux"
+            fi
+
+            info "手动排查命令:"
+            echo "    su - ${GITEA_USER} -c 'GITEA_WORK_DIR=${GITEA_WORK_DIR} ${GITEA_BIN} web --config ${GITEA_CONFIG}' | head -50"
+            echo "    journalctl -u gitea -f"
+            echo "    PGPASSWORD='***' psql -h 127.0.0.1 -U ${GITEA_DB_USER} -d ${GITEA_DB_NAME} -c 'SELECT 1;'"
+            return 1
+        fi
+    fi
+
+    # 启动服务
     systemctl restart gitea
 
     # 等待服务就绪
-    local max_retry=30
+    local max_retry=15
     local retry=0
-    info "等待 Gitea 启动..."
+    info "等待 Gitea HTTP 端口 ${GITEA_HTTP_PORT} 就绪..."
     while [ $retry -lt $max_retry ]; do
         if curl -s -o /dev/null -w "%{http_code}" "http://localhost:${GITEA_HTTP_PORT}" 2>/dev/null \
             | grep -qE "2[0-9][0-9]|3[0-9][0-9]|401|404"; then
-            ok "Gitea 服务已就绪 (http://localhost:${GITEA_HTTP_PORT})"
+            ok "Gitea 服务已就绪 → http://localhost:${GITEA_HTTP_PORT}"
             return 0
         fi
         sleep 2
         retry=$((retry + 1))
-        progress "$retry" "$max_retry" "等待启动"
+        progress "$retry" "$max_retry" "等待 HTTP 响应"
     done
 
-    warn "Gitea 启动超时或失败!"
-    echo ""
-    echo -e "  ${C[YD]}┌─── 最近日志 (journalctl) ──────────────────────────────────────┐${C[NC]}"
+    warn "Gitea 启动超时!"
     journalctl -u gitea --no-pager -n 15 2>/dev/null | while IFS= read -r line; do
-        echo -e "  ${C[W]}│${C[NC]} $line"
+        echo -e "  ${C[W]}[journal]${C[NC]} $line"
     done || true
-    echo -e "  ${C[YD]}└──────────────────────────────────────────────────────────────────┘${C[NC]}"
-    echo ""
-    info "常见原因: 数据库连接失败 / 端口冲突 / 配置文件权限"
     info "手动排查: journalctl -u gitea -f"
 }
 
@@ -1182,16 +1209,16 @@ show_status() {
 
 show_admin_info() {
     echo ""
-    echo -e "  ${C[YD]}┌─────────────────────────────────────────────────────────────────────┐${C[NC]}"
-    echo -e "  ${C[YD]}│                         🔐 管理员凭据                              │${C[NC]}"
-    echo -e "  ${C[YD]}├─────────────────────────────────────────────────────────────────────┤${C[NC]}"
-    echo -e "  ${C[YD]}│${C[NC]}  用户名: ${C[WD]}${GITEA_ADMIN_USER}${C[NC]}"
-    echo -e "  ${C[YD]}│${C[NC]}  密码:   ${C[WD]}${GITEA_ADMIN_PASSWORD}${C[NC]}"
-    echo -e "  ${C[YD]}│${C[NC]}  邮箱:   ${C[W]}${GITEA_ADMIN_EMAIL}${C[NC]}"
-    echo -e "  ${C[YD]}│${C[NC]}                                                                    "
-    echo -e "  ${C[YD]}│${C[NC]}  ${C[R]}⚠  请立即登录修改密码!${C[NC]}"
-    echo -e "  ${C[YD]}│${C[NC]}  ${C[W]}配置文件: ${CONFIG_FILE}${C[NC]}"
-    echo -e "  ${C[YD]}└─────────────────────────────────────────────────────────────────────┘${C[NC]}"
+    draw_box_top
+    draw_box_line "🔐 管理员凭据" "${C[YD]}"
+    draw_divider
+    draw_box_line "用户名:    ${C[WD]}${GITEA_ADMIN_USER}${C[W]}"
+    draw_box_line "密码:      ${C[WD]}${GITEA_ADMIN_PASSWORD}${C[W]}"
+    draw_box_line "邮箱:      ${C[W]}${GITEA_ADMIN_EMAIL}"
+    draw_divider
+    draw_box_line "${C[R]}⚠ 请立即登录修改密码!${C[W]}"
+    draw_box_line "配置存档:  ${CONFIG_FILE}"
+    draw_box_bottom
 }
 
 # ─── 更新功能 ───────────────────────────────────────────────────────────────────
@@ -1310,12 +1337,7 @@ full_install() {
     fi
 
     echo ""
-    echo -e "  ${C[YD]}即将开始一键部署:${C[NC]}"
-    echo -e "  ${C[W]}  • Gitea (Git 服务)${C[NC]}"
-    echo -e "  ${C[W]}  • Caddy 反向代理 + 自动 HTTPS${C[NC]}"
-    echo -e "  ${C[W]}  • PostgreSQL (数据库)${C[NC]}"
-    echo -e "  ${C[W]}  • Gitea Actions Runner${C[NC]}"
-    echo -e "  ${C[W]}  • Docker (Actions Runner 依赖)${C[NC]}"
+    printf "  ${C[YD]}即将安装:${C[NC]}  Gitea  ·  Caddy  ·  PostgreSQL  ·  Docker  ·  Actions Runner\n"
     echo ""
 
     # 加载已有配置
@@ -1360,28 +1382,17 @@ full_install() {
 
     # ─── 完成 ──────────────────────────────────────────────────────
     echo ""
-    echo -e "${C[GD]}"
-    echo "  ╔══════════════════════════════════════════════════════════════╗"
-    echo "  ║                                                              ║"
-    echo "  ║              ✅ 安装全部完成!                                ║"
-    echo "  ║                                                              ║"
-    echo "  ╚══════════════════════════════════════════════════════════════╝"
-    echo -e "${C[NC]}"
+    printf "  ${C[GD]}%s${C[NC]}\n" "$(printf '%*s' 70 '' | tr ' ' '═')"
+    printf "  ${C[GD]}  ✓  安装全部完成!${C[NC]}\n"
+    printf "  ${C[GD]}%s${C[NC]}\n" "$(printf '%*s' 70 '' | tr ' ' '═')"
 
     show_status
     show_admin_info
 
     echo ""
-    draw_line "─"
-    echo -e "  ${C[W]}常用命令:${C[NC]}"
-    echo -e "  ${C[CD]}systemctl status gitea${C[NC]}        查看 Gitea 状态"
-    echo -e "  ${C[CD]}journalctl -u gitea -f${C[NC]}         查看 Gitea 日志"
-    echo -e "  ${C[CD]}systemctl status caddy${C[NC]}         查看 Caddy 状态"
-    echo -e "  ${C[CD]}${GITEA_HOME}/register-runner.sh${C[NC]}    注册 Actions Runner"
-    echo -e "  ${C[CD]}$0 check${C[NC]}                       检查更新"
-    echo -e "  ${C[CD]}$0 update${C[NC]}                       更新到最新版本"
-    echo -e "  ${C[CD]}$0 status${C[NC]}                       查看服务状态"
-    draw_line "─"
+    printf "  ${C[BD]}%s${C[NC]}\n" "$(printf '%*s' 70 '' | tr ' ' '─')"
+    printf "  ${C[W]}常用:${C[NC]}  systemctl status gitea │ journalctl -u gitea -f │ $0 check │ $0 update\n"
+    printf "  ${C[BD]}%s${C[NC]}\n" "$(printf '%*s' 70 '' | tr ' ' '─')"
     echo ""
     _log "INFO" "Installation completed successfully"
 }
