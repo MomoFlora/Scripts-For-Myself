@@ -699,28 +699,36 @@ setup_runner() {
     local ra="$ARCH"
     case "$ra" in amd64|arm64) ;; arm-6) ra="armv6" ;; *) ra="amd64" ;; esac
 
-    local rurl="https://gitea.com/gitea/act_runner/releases/download/v${rv}/act_runner-${rv}-linux-${ra}"
-    if curl -fsSL -o /usr/local/bin/act_runner "$rurl" 2>/dev/null; then
-        chmod +x /usr/local/bin/act_runner
-        LOG_OK "act_runner v${rv} 已安装"
-    else
-        LOG_WARN "act_runner 下载失败"; return 0
+    # 优先从 dl.gitea.com 下载 (官方 CDN)
+    local rurl="https://dl.gitea.com/act_runner/${rv}/act_runner-${rv}-linux-${ra}"
+    if ! curl -fsSL -o /usr/local/bin/act_runner "$rurl" 2>/dev/null; then
+        # 回退到 releases 页面
+        rurl="https://gitea.com/gitea/act_runner/releases/download/v${rv}/act_runner-${rv}-linux-${ra}"
+        curl -fsSL -o /usr/local/bin/act_runner "$rurl" 2>/dev/null || {
+            LOG_WARN "act_runner 下载失败，跳过"; return 0
+        }
+    fi
+    chmod +x /usr/local/bin/act_runner
+    LOG_OK "act_runner v${rv} 已安装"
+
+    # 自动生成 Runner token 并注册
+    LOG_OUT "注册 Actions Runner ..."
+    local token; token="$(su -s /bin/bash "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} --config ${GT_CFG} actions generate-runner-token 2>/dev/null" || true)"
+    if [ -z "$token" ]; then
+        LOG_WARN "无法自动获取 Runner token，请手动注册"
+        LOG_OUT "手动注册: /usr/local/bin/act_runner register --instance http://localhost:${GT_PORT}"
+        return 0
     fi
 
-    mkdir -p "${GT_HOME}/.runner"
-    cat > "${GT_HOME}/register-runner.sh" << 'REGSCRIPT'
-#!/usr/bin/env bash
-set -euo pipefail
-echo "请在 Gitea 后台获取 Runner Token: 站点管理 → Actions → Runners → 创建 Runner"
-read -rp "Token: " TOKEN < /dev/tty
-[ -z "$TOKEN" ] && { echo "Token 不能为空"; exit 1; }
-exec /usr/local/bin/act_runner register --no-interactive \
-    --instance "http://localhost:3000" --token "$TOKEN" --name "runner-$(hostname)" \
-    --labels "ubuntu-latest:docker://node:20-bullseye,ubuntu-22.04:docker://catthehacker/ubuntu:act-22.04"
-REGSCRIPT
-    chmod +x "${GT_HOME}/register-runner.sh"
-    chown -R "${GT_USR}:${GT_USR}" "${GT_HOME}/.runner"
-    LOG_OUT "注册脚本: ${GT_HOME}/register-runner.sh"
+    su -s /bin/bash "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} /usr/local/bin/act_runner register \
+        --no-interactive \
+        --instance http://localhost:${GT_PORT} \
+        --token '${token}' \
+        --name 'runner-$(hostname)' \
+        --labels 'ubuntu-latest:docker://node:20-bullseye,ubuntu-22.04:docker://catthehacker/ubuntu:act-22.04'" 2>/dev/null && \
+        LOG_OK "Runner 注册成功" || LOG_WARN "Runner 注册失败"
+
+    chown -R "${GT_USR}:${GT_USR}" "${GT_HOME}/.runner" 2>/dev/null || true
 }
 
 #===============================================================================
@@ -767,20 +775,20 @@ show_summary() {
     [ "$CD_ENABLE" = "true" ] && [ -n "$CD_DOMAIN" ] && proto="https"
 
     echo ""
-    printf "  ${CLR_BLD}%s${CLR_RST}\n" "$(printf '%*s' 56 '' | tr ' ' '═')"
-    printf "  ${CLR_GRN}  ✓  部署完成${CLR_RST}\n\n"
+    printf "  ${CLR_BLD}%s${CLR_RST}\n" "$(printf '%*s' 56 '' | tr ' ' '=')"
+    printf "  ${CLR_GRN}  [OK]  Deployment Complete${CLR_RST}\n\n"
 
-    local gok="${CLR_RED}○ 停止${CLR_RST}"
-    systemctl is-active --quiet gitea 2>/dev/null && gok="${CLR_GRN}● 运行${CLR_RST}"
-    printf "  %-14s %b  ${CLR_DIM}v%s${CLR_RST}\n" "Gitea" "$gok" "${GT_VER}"
+    local gok="${CLR_RED}DOWN${CLR_RST}"
+    systemctl is-active --quiet gitea 2>/dev/null && gok="${CLR_GRN}UP${CLR_RST}"
+    printf "  %-14s %b   ${CLR_DIM}v%s${CLR_RST}\n" "Gitea" "$gok" "${GT_VER}"
 
-    local pok="${CLR_RED}○ 停止${CLR_RST}"
-    systemctl is-active --quiet postgresql 2>/dev/null && pok="${CLR_GRN}● 运行${CLR_RST}"
-    printf "  %-14s %b  ${CLR_DIM}%s${CLR_RST}\n" "PostgreSQL" "$pok" "$(psql --version 2>/dev/null | awk '{print $NF}' || echo '?')"
+    local pok="${CLR_RED}DOWN${CLR_RST}"
+    systemctl is-active --quiet postgresql 2>/dev/null && pok="${CLR_GRN}UP${CLR_RST}"
+    printf "  %-14s %b   ${CLR_DIM}%s${CLR_RST}\n" "PostgreSQL" "$pok" "$(psql --version 2>/dev/null | awk '{print $NF}' || echo '?')"
 
     if [ "$CD_ENABLE" = "true" ]; then
-        local cok="${CLR_RED}○ 停止${CLR_RST}"
-        systemctl is-active --quiet caddy 2>/dev/null && cok="${CLR_GRN}● 运行${CLR_RST}"
+        local cok="${CLR_RED}DOWN${CLR_RST}"
+        systemctl is-active --quiet caddy 2>/dev/null && cok="${CLR_GRN}UP${CLR_RST}"
         printf "  %-14s %b\n" "Caddy" "$cok"
     fi
 
@@ -793,7 +801,7 @@ show_summary() {
     printf "  ${CLR_DIM}用户${CLR_RST}  %s\n" "$ADM_USR"
     printf "  ${CLR_DIM}密码${CLR_RST}  ${CLR_WHT}%s${CLR_RST}\n" "$ADM_PWD"
     printf "  ${CLR_DIM}存档${CLR_RST}  %s\n" "$SAVEFILE"
-    printf "\n  ${CLR_BLD}%s${CLR_RST}\n" "$(printf '%*s' 56 '' | tr ' ' '═')"
+    printf "\n  ${CLR_BLD}%s${CLR_RST}\n" "$(printf '%*s' 56 '' | tr ' ' '=')"
     echo ""
 }
 
