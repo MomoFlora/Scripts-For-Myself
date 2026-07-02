@@ -405,10 +405,11 @@ generate_gitea_config() {
     if [ "$CD_ENABLE" = "true" ] && [ -n "$CD_DOMAIN" ]; then
         domain="$CD_DOMAIN"; root_url="https://${CD_DOMAIN}/"
     else
-        # 未配置 Caddy — 让用户输入公网IP或域名
-        local pub; pub="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost')"
-        LOG_OUT "当前检测到的内网IP: ${pub}"
-        domain="$(ask "  ${CLR_WHT}请输入服务器公网IP或域名 (用于生成 Clone URL):${CLR_RST} " "$pub")"
+        # 自动获取公网IP
+        local pub; pub="$(curl -s --max-time 3 ifconfig.me 2>/dev/null || curl -s --max-time 3 icanhazip.com 2>/dev/null || echo '')"
+        if [ -z "$pub" ]; then pub="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost')"; fi
+        LOG_OUT "公网 IP: ${pub}"
+        domain="${pub}"
         root_url="http://${domain}:${GT_PORT}/"
     fi
     ADM_MAIL="${ADM_MAIL:-admin@${domain}}"
