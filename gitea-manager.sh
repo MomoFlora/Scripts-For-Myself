@@ -1,295 +1,172 @@
 #!/usr/bin/env bash
 # ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║                    Gitea Tools Manager v1.0.0                                ║
-# ║         一键部署 Gitea + Gitea Actions + PostgreSQL                           ║
-# ║         自动检测更新 · 多架构支持 · 全自动配置                                 ║
+# ║                         Gitea Tools Manager  v1.1.0                          ║
+# ║          Gitea · Caddy · PostgreSQL · Actions Runner  —  一键部署             ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 #
+# 架构: Linux amd64 | arm64 | armv7 | riscv64 | loong64
+# 发行版: Debian | Ubuntu | RHEL | Rocky | Alma | Fedora | Arch
+# 依赖: curl git wget gnupg openssl docker
+#
 set -euo pipefail
+shopt -s extglob
 
-# ─── 全局变量 ───────────────────────────────────────────────────────────────────
-VERSION="1.0.0"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/gitea-manager.conf"
-LOG_FILE="${SCRIPT_DIR}/gitea-manager.log"
+# ──────────────────────────────────────────────────────────────────────────────
+# 常量 & 默认值
+# ──────────────────────────────────────────────────────────────────────────────
+readonly SCRIPT_VERSION="1.1.0"
+readonly SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+readonly CONFIG_FILE="${SCRIPT_DIR}/gitea-manager.conf"
+readonly LOG_FILE="${SCRIPT_DIR}/gitea-manager.log"
 
-# 颜色定义 (使用 $'...' 生成真实的 ANSI 转义码)
-declare -A C=(
-    [R]=$'\033[0;31m'     # Red
-    [G]=$'\033[0;32m'     # Green
-    [Y]=$'\033[0;33m'     # Yellow
-    [B]=$'\033[0;34m'     # Blue
-    [P]=$'\033[0;35m'     # Purple
-    [C]=$'\033[0;36m'     # Cyan
-    [W]=$'\033[0;37m'     # White
-    [RD]=$'\033[1;31m'    # Bold Red
-    [GD]=$'\033[1;32m'    # Bold Green
-    [YD]=$'\033[1;33m'    # Bold Yellow
-    [BD]=$'\033[1;34m'    # Bold Blue
-    [PD]=$'\033[1;35m'    # Bold Purple
-    [CD]=$'\033[1;36m'    # Bold Cyan
-    [WD]=$'\033[1;37m'    # Bold White
-    [BG_R]=$'\033[41m'    # BG Red
-    [BG_G]=$'\033[42m'    # BG Green
-    [BG_B]=$'\033[44m'    # BG Blue
-    [BG_P]=$'\033[45m'    # BG Purple
-    [NC]=$'\033[0m'       # No Color
-)
-
-# 默认配置
-GITEA_VERSION="latest"
-GITEA_USER="gitea"
-GITEA_HOME="/var/lib/gitea"
-GITEA_BIN="/usr/local/bin/gitea"
-GITEA_WORK_DIR="/var/lib/gitea"
-GITEA_CUSTOM="/var/lib/gitea/custom"
-GITEA_CONFIG="/etc/gitea/app.ini"
-GITEA_HTTP_PORT="3000"
-GITEA_SSH_PORT="22"
-GITEA_DOMAIN="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost')"
-GITEA_ROOT_URL="http://${GITEA_DOMAIN}:${GITEA_HTTP_PORT}/"
-
-# Caddy 反代
-CADDY_ENABLED="false"
-CADDY_DOMAIN=""
-GITEA_DB_TYPE="postgres"
-GITEA_DB_HOST="127.0.0.1:5432"
-GITEA_DB_NAME="gitea"
-GITEA_DB_USER="gitea"
-GITEA_DB_PASSWORD=""
-GITEA_ADMIN_USER="gitea_admin"
-GITEA_ADMIN_PASSWORD=""
-GITEA_ADMIN_EMAIL="admin@${GITEA_DOMAIN}"
-
-# Actions Runner
-ACTIONS_RUNNER_ENABLED="true"
-ACTIONS_RUNNER_VERSION="latest"
-ACTIONS_RUNNER_LABELS="ubuntu-latest:docker://node:20-bullseye,ubuntu-22.04:docker://catthehacker/ubuntu:act-22.04"
+# Gitea
+GITEA_VERSION="${GITEA_VERSION:-latest}"
+GITEA_USER="${GITEA_USER:-gitea}"
+GITEA_HOME="${GITEA_HOME:-/var/lib/gitea}"
+GITEA_BIN="${GITEA_BIN:-/usr/local/bin/gitea}"
+GITEA_CONF="${GITEA_CONF:-/etc/gitea/app.ini}"
+GITEA_LISTEN="${GITEA_LISTEN:-3000}"
 
 # PostgreSQL
-PG_VERSION=""
-PG_DATA_DIR="/var/lib/postgresql/data"
-PG_CONF_DIR="/etc/postgresql"
+PG_HOST="${PG_HOST:-127.0.0.1}"
+PG_PORT="${PG_PORT:-5432}"
+PG_NAME="${PG_NAME:-gitea}"
+PG_USER="${PG_USER:-gitea}"
+PG_PASS="${PG_PASS:-}"
 
-# 系统信息
-ARCH=""
-OS=""
-OS_ID=""
-OS_VERSION=""
-TOTAL_STEPS=14
-CURRENT_STEP=0
+# Caddy
+CADDY_ENABLE="${CADDY_ENABLE:-}"
+CADDY_DOMAIN="${CADDY_DOMAIN:-}"
 
-# ─── 工具函数 ───────────────────────────────────────────────────────────────────
+# Admin
+ADMIN_USER="${ADMIN_USER:-gitea_admin}"
+ADMIN_PASS="${ADMIN_PASS:-}"
+ADMIN_MAIL="${ADMIN_MAIL:-}"
 
-# 日志写入
-_log() {
-    local level="$1" msg="$2"
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [${level}] ${msg}" >> "$LOG_FILE"
+# Actions Runner
+RUNNER_ENABLE="${RUNNER_ENABLE:-true}"
+
+# 运行时
+OS_ID=""; OS_VER=""; ARCH=""; TOTAL_STEPS=0; STEP=0
+readonly WIDTH=64
+
+# ──────────────────────────────────────────────────────────────
+# ANSI 颜色 — 克制、专业的调色板
+# ──────────────────────────────────────────────────────────────
+C_RST=$'\033[0m'
+C_DIM=$'\033[2m'
+C_RED=$'\033[0;31m'
+C_GRN=$'\033[0;32m'
+C_YEL=$'\033[0;33m'
+C_BLU=$'\033[0;34m'
+C_CYN=$'\033[0;36m'
+C_WHT=$'\033[0;37m'
+C_BLD=$'\033[1m'
+C_BRD=$'\033[1;31m'
+C_BGN=$'\033[1;32m'
+C_BYL=$'\033[1;33m'
+C_BCY=$'\033[1;36m'
+C_BWT=$'\033[1;37m'
+
+# ──────────────────────────────────────────────────────────────
+# 基础工具
+# ──────────────────────────────────────────────────────────────
+_log() { printf "[%(%F %T)T] %-7s %s\n" -1 "$1" "$2" >> "$LOG_FILE"; }
+
+_hr() { printf "${C_DIM}%*s${C_RST}\n" "$WIDTH" "" | tr ' ' '─'; }
+
+_title() { printf "\n${C_BCY}  %s${C_RST}\n" "$*"; _hr; }
+
+_ok()   { printf "  ${C_GRN}✓${C_RST} %s\n" "$*"; }
+
+_err()  { printf "  ${C_BRD}✗${C_RST} %s\n" "$*" >&2; }
+
+_info() { printf "  ${C_DIM}→${C_RST} %s\n" "$*"; }
+
+_warn() { printf "  ${C_BYL}!${C_RST} ${C_YEL}%s${C_RST}\n" "$*"; }
+
+_step() {
+    STEP=$((STEP + 1))
+    printf "\n${C_BCY}  [%02d/%02d]${C_RST} ${C_BLD}%s${C_RST}\n" "$STEP" "$TOTAL_STEPS" "$*"
+    _hr
 }
 
-# 交互式输入 — 始终从 /dev/tty 读取，兼容 curl | bash 管道模式
-# 用法: ask "提示文本" "默认值"  → 输出用户输入到 stdout
-ask() {
-    local prompt_text="$1" default="$2" input
-    printf "%b" "$prompt_text" > /dev/tty
-    if ! read -r input < /dev/tty 2>/dev/null; then
-        # 非交互环境（无 /dev/tty）— 返回默认值
-        printf '%s' "$default"
-        return 0
-    fi
+# 交互式读取 (curl|bash safe)
+_ask() {
+    local prompt="$1" default="$2" input
+    printf "%b" "$prompt" > /dev/tty 2>/dev/null || { printf '%s' "$default"; return 0; }
+    read -r input < /dev/tty 2>/dev/null || { printf '%s' "$default"; return 0; }
     if [ -z "$input" ]; then input="$default"; fi
     printf '%s' "$input"
 }
 
-# ══════════════════════════════════════════════════════════════════════════════════
-# 输出美化函数
-# ══════════════════════════════════════════════════════════════════════════════════
+# 校验域名格式
+_valid_domain() { [[ "$1" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; }
 
-banner() {
-    clear 2>/dev/null || true
-    local cols; cols=$(tput cols 2>/dev/null || echo 80)
-    printf "${C[BD]}%*s${C[NC]}\n" "$cols" "" | tr ' ' '─'
-    printf "${C[BD]}  Gitea Tools Manager${C[NC]}  ${C[W]}v%s${C[NC]}\n" "$VERSION"
-    printf "${C[CD]}  Gitea · Caddy · PostgreSQL · Actions Runner  —  一键部署${C[NC]}\n"
-    printf "${C[BD]}%*s${C[NC]}\n" "$cols" "" | tr ' ' '─'
-    echo ""
-}
-
-draw_line() {
-    local char="${1:-─}"
-    printf '%*s\n' "$(tput cols 2>/dev/null || echo 80)" | tr ' ' "$char"
-}
-
-draw_box_top() {
-    printf "  ${C[BD]}╔══════════════════════════════════════════════════════════════════════╗${C[NC]}\n"
-}
-
-draw_box_bottom() {
-    printf "  ${C[BD]}╚══════════════════════════════════════════════════════════════════════╝${C[NC]}\n"
-}
-
-# ANSI 去色函数 — 返回可见字符长度
-_strip_ansi() { sed 's/\x1b\[[0-9;]*m//g' <<< "$1"; }
-
-draw_box_line() {
-    local text="$1" color="${2:-${C[W]}}" inner stripped viz pad
-    inner="${color}${text}${C[NC]}"
-    stripped=$(_strip_ansi "$inner")
-    viz=${#stripped}
-    pad=$((68 - viz))
-    [ "$pad" -lt 1 ] && pad=1
-    printf "  ${C[BD]}║${C[NC]} ${inner}%*s${C[BD]}║${C[NC]}\n" "$pad" ""
-}
-
-# 短分隔线
-draw_divider() {
-    printf "  ${C[BD]}╟──────────────────────────────────────────────────────────────────╢${C[NC]}\n"
-}
-
-step_header() {
-    CURRENT_STEP=$((CURRENT_STEP + 1))
-    echo ""
-    printf "  ${C[BD]}[%02d/%02d]${C[NC]} ${C[YD]}%s${C[NC]}\n" "$CURRENT_STEP" "$TOTAL_STEPS" "$1"
-    printf "  ${C[BD]}%*s${C[NC]}\n" 60 "" | tr ' ' '─'
-}
-
-ok() {
-    echo -e "  ${C[G]}✔${C[NC]} ${C[W]}$1${C[NC]}"
-}
-
-info() {
-    echo -e "  ${C[C]}ℹ${C[NC]} ${C[W]}$1${C[NC]}"
-}
-
-warn() {
-    echo -e "  ${C[Y]}⚠${C[NC]} ${C[Y]}$1${C[NC]}"
-}
-
-error() {
-    echo -e "  ${C[R]}✘${C[NC]} ${C[RD]}$1${C[NC]}"
-}
-
-progress() {
-    local current="$1" total="$2" label="$3"
-    local percent=$(( current * 100 / total ))
-    local filled=$(( percent / 2 ))
-    local empty=$(( 50 - filled ))
-    printf "  ${C[C]}%-20s${C[NC]} ${C[BD]}[%s%s]${C[NC]} ${C[YD]}%3d%%${C[NC]}\r" \
-        "$label" \
-        "$(printf '%*s' "$filled" | tr ' ' '█')" \
-        "$(printf '%*s' "$empty" | tr ' ' '░')" \
-        "$percent"
-    if [ "$current" -eq "$total" ]; then
-        echo ""
-    fi
-}
-
-# 显示表格
-print_table_header() {
-    printf "  ${C[BD]}%-30s │ %s${C[NC]}\n" "$1" "$2"
-    printf "  %-30s─┼─%s\n" "$(printf '%*s' 30 | tr ' ' '─')" "$(printf '%*s' 38 | tr ' ' '─')"
-}
-
-print_table_row() {
-    printf "  ${C[W]}%-30s${C[NC]} │ ${C[CD]}%s${C[NC]}\n" "$1" "$2"
-}
-
-# ─── 系统检测 ───────────────────────────────────────────────────────────────────
-
-detect_os() {
-    step_header "检测操作系统与架构"
+# ──────────────────────────────────────────────────────────────
+# 系统探测
+# ──────────────────────────────────────────────────────────────
+detect_system() {
+    _step "检测系统环境"
 
     if [ -f /etc/os-release ]; then
         . /etc/os-release
-        OS_ID="$ID"
-        OS_VERSION="$VERSION_ID"
+        OS_ID="$ID"; OS_VER="${VERSION_ID:-}"
         case "$ID" in
-            ubuntu|debian)     OS="debian" ;;
+            ubuntu|debian)             OS="debian" ;;
             centos|rhel|rocky|almalinux|fedora|oracle) OS="rhel" ;;
-            arch|manjaro)      OS="arch" ;;
-            alpine)            OS="alpine" ;;
-            opensuse*)         OS="suse" ;;
-            *)                 OS="unknown" ;;
+            arch|manjaro)              OS="arch" ;;
+            *)                         OS="unknown" ;;
         esac
-    elif [ "$(uname)" = "Darwin" ]; then
-        OS="macos"
-        OS_ID="macos"
     else
-        OS="unknown"
-        OS_ID="unknown"
+        OS="unknown"; OS_ID="unknown"
     fi
 
-    local machine
-    machine="$(uname -m)"
+    local machine; machine="$(uname -m)"
     case "$machine" in
-        x86_64|amd64)   ARCH="amd64" ;;
-        aarch64|arm64)  ARCH="arm64" ;;
-        armv7l)         ARCH="arm-5" ;;
-        armv6l)         ARCH="arm-6" ;;
-        i386|i686)      ARCH="386" ;;
-        riscv64)        ARCH="riscv64" ;;
-        loongarch64)    ARCH="loong64" ;;
-        *)              ARCH="amd64"; warn "未知架构: $machine，默认使用 amd64" ;;
+        x86_64|amd64)  ARCH="amd64"  ;;
+        aarch64|arm64) ARCH="arm64"  ;;
+        armv7l)        ARCH="arm-6"  ;;
+        armv6l)        ARCH="arm-6"  ;;
+        riscv64)       ARCH="riscv64";;
+        loongarch64)   ARCH="loong64";;
+        *)             ARCH="amd64"; _warn "未知架构 $machine，回退到 amd64" ;;
     esac
 
-    ok "操作系统: ${OS_ID} ${OS_VERSION}  (${OS})"
-    ok "CPU 架构:  ${ARCH}"
-    _log "INFO" "Detected OS=${OS_ID}:${OS_VERSION} ARCH=${ARCH}"
+    _ok "系统: ${OS_ID} ${OS_VER} · 架构: ${ARCH} · 内核: $(uname -r)"
+    _log INFO "detect: OS=${OS_ID}:${OS_VER} ARCH=${ARCH}"
 }
 
-detect_gpg_keyring() {
-    # 检测可用的 GPG keyring 路径 (Gitea 用于验证签名)
-    local paths=(
-        "/usr/share/keyrings/gitea-archive-keyring.gpg"
-        "/etc/apt/keyrings/gitea-archive-keyring.gpg"
-    )
-    for p in "${paths[@]}"; do
-        local dir; dir="$(dirname "$p")"
-        if [ -d "$dir" ]; then
-            echo "$p"
-            return 0
-        fi
-    done
-    echo "/usr/share/keyrings/gitea-archive-keyring.gpg"
-}
+# ──────────────────────────────────────────────────────────────
+# 依赖安装 (curl git docker ...)
+# ──────────────────────────────────────────────────────────────
+install_deps() {
+    _step "安装系统依赖"
 
-# ─── 依赖检查 ───────────────────────────────────────────────────────────────────
-
-install_dependencies() {
-    step_header "安装系统依赖 (curl git docker ...)"
-
-    local deps="curl wget tar gzip git gnupg openssl ca-certificates"
+    local pkgs="curl wget ca-certificates git gnupg openssl"
 
     case "$OS" in
         debian)
-            info "更新 apt 源..."
-            apt-get update -qq 2>/dev/null
-            info "安装基础依赖..."
-            apt-get install -y -qq $deps 2>/dev/null
-            info "安装 Docker..."
+            apt-get update -qq 2>/dev/null || true
+            apt-get install -y -qq $pkgs 2>/dev/null
             if ! command -v docker &>/dev/null; then
-                apt-get install -y -qq docker.io docker-compose 2>/dev/null || \
+                _info "安装 Docker..."
+                apt-get install -y -qq docker.io docker-compose-v2 2>/dev/null || \
                     curl -fsSL https://get.docker.com | bash -s 2>/dev/null
-            else
-                ok "Docker 已安装 — 跳过"
             fi
             ;;
         rhel)
-            if command -v dnf &>/dev/null; then
-                dnf install -y -q $deps 2>/dev/null
-            else
-                yum install -y -q $deps 2>/dev/null
-            fi
+            dnf install -y -q $pkgs 2>/dev/null || yum install -y -q $pkgs 2>/dev/null
             if ! command -v docker &>/dev/null; then
                 dnf install -y -q docker docker-compose 2>/dev/null || \
                     curl -fsSL https://get.docker.com | bash -s 2>/dev/null
             fi
             ;;
         arch)
-            pacman -S --noconfirm --needed $deps docker docker-compose 2>/dev/null
+            pacman -S --noconfirm --needed $pkgs docker docker-compose 2>/dev/null
             ;;
         *)
-            warn "未知系统，请手动安装依赖: $deps"
+            _warn "未知发行版，请手动安装: $pkgs docker"
             ;;
     esac
 
@@ -297,472 +174,210 @@ install_dependencies() {
     if command -v docker &>/dev/null; then
         systemctl enable docker 2>/dev/null || true
         systemctl start docker 2>/dev/null || true
-        ok "Docker $(docker --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || echo '') 已就绪"
+        _ok "Docker $(docker --version 2>/dev/null | awk '{print $3}' | tr -d ',') 已就绪"
     fi
 
-    ok "系统依赖安装完成"
+    _ok "系统依赖安装完成"
+    _log INFO "deps installed"
 }
 
-# ─── Caddy 反代 & 域名配置 ────────────────────────────────────────────────────────
-
-prompt_domain() {
-    step_header "配置域名与反向代理"
-
-    echo ""
-    echo -e "  ${C[CD]}┌─────────────────────────────────────────────────────────────────────┐${C[NC]}"
-    echo -e "  ${C[CD]}│                     🌐 反向代理配置                                │${C[NC]}"
-    echo -e "  ${C[CD]}├─────────────────────────────────────────────────────────────────────┤${C[NC]}"
-    echo -e "  ${C[CD]}│${C[NC]}  Caddy 将自动为你的域名申请 SSL 证书 (Let's Encrypt)           ${C[CD]}│${C[NC]}"
-    echo -e "  ${C[CD]}│${C[NC]}  实现 HTTPS 安全访问 + 自动续期                               ${C[CD]}│${C[NC]}"
-    echo -e "  ${C[CD]}└─────────────────────────────────────────────────────────────────────┘${C[NC]}"
-    echo ""
-
-    # 获取本机IP作为提示
-    local local_ip
-    local_ip="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'your-server-ip')"
-
-    echo -e "  ${C[W]}你的服务器 IP: ${C[YD]}${local_ip}${C[NC]}"
-    echo -e "  ${C[W]}请确保域名 DNS 已解析到该 IP 地址${C[NC]}"
-    echo ""
-
-    # 交互式输入域名
-    while true; do
-        user_domain=$(ask $'  \033[1;36m请输入域名 (留空跳过反代配置): \033[0m' "")
-
-        if [ -z "$user_domain" ]; then
-            echo ""
-            warn "跳过反向代理配置 — Gitea 将直接通过 IP:端口 访问"
-            CADDY_ENABLED="false"
-            CADDY_DOMAIN=""
-            return 0
-        fi
-
-        # 简单校验域名格式
-        if echo "$user_domain" | grep -qE '^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'; then
-            CADDY_DOMAIN="$user_domain"
-            CADDY_ENABLED="true"
-            break
-        else
-            error "域名格式不正确，请输入类似 git.example.com 的域名"
-        fi
-    done
-
-    # 确认
-    echo ""
-    draw_box_top
-    draw_box_line "域名配置确认" "${C[YD]}"
-    draw_box_line "$(printf '%*s' 67 | tr ' ' '-')"
-    draw_box_line "域名:       ${C[GD]}${CADDY_DOMAIN}${C[W]}"
-    draw_box_line "Gitea 地址: ${C[CD]}https://${CADDY_DOMAIN}${C[W]}"
-    draw_box_line "SSH 地址:   ${C[W]}git@${CADDY_DOMAIN}"
-    draw_box_line "SSL 证书:   ${C[G]}Let's Encrypt 自动管理${C[W]}"
-    draw_box_bottom
-    echo ""
-
-    confirm=$(ask $'  \033[1;33m确认以上配置? [Y/n]: \033[0m' "y")
-    if [ "${confirm,,}" = "n" ] || [ "${confirm,,}" = "no" ]; then
-        warn "已取消，请重新输入"
-        CADDY_ENABLED="false"
-        CADDY_DOMAIN=""
-        prompt_domain
-        return
-    fi
-
-    ok "域名配置完成: ${CADDY_DOMAIN}"
-
-    # 更新 Gitea 全局变量
-    GITEA_DOMAIN="${CADDY_DOMAIN}"
-    GITEA_ROOT_URL="https://${CADDY_DOMAIN}/"
-    GITEA_SSH_DOMAIN="${CADDY_DOMAIN}"
-    GITEA_ADMIN_EMAIL="admin@${CADDY_DOMAIN}"
-
-    _log "INFO" "Domain configured: ${CADDY_DOMAIN} (Caddy reverse proxy)"
-}
-
-install_caddy() {
-    step_header "安装 Caddy 反向代理服务器"
-
-    if [ "$CADDY_ENABLED" != "true" ]; then
-        info "未配置域名，跳过 Caddy 安装"
-        return 0
-    fi
-
-    if command -v caddy &>/dev/null; then
-        ok "Caddy 已安装: $(caddy version 2>/dev/null | head -1)"
-    else
-        info "安装 Caddy..."
-        case "$OS" in
-            debian)
-                apt-get install -y -qq debian-keyring debian-archive-keyring 2>/dev/null
-                curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
-                    | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null
-                curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
-                    | tee /etc/apt/sources.list.d/caddy-stable.list 2>/dev/null
-                apt-get update -qq 2>/dev/null
-                apt-get install -y -qq caddy 2>/dev/null
-                ;;
-            rhel)
-                dnf install -y -q 'dnf-command(copr)' 2>/dev/null || true
-                dnf copr enable -y @caddy/caddy 2>/dev/null || true
-                dnf install -y -q caddy 2>/dev/null || \
-                    yum install -y -q yum-plugin-copr 2>/dev/null || true
-                ;;
-            arch)
-                pacman -S --noconfirm --needed caddy 2>/dev/null
-                ;;
-            *)
-                # 通用安装方式
-                curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=${ARCH}" \
-                    -o /usr/local/bin/caddy 2>/dev/null
-                chmod +x /usr/local/bin/caddy
-                # 创建 systemd 服务
-                caddy trust 2>/dev/null || true
-                ;;
-        esac
-        ok "Caddy 安装完成"
-    fi
-
-    # 确保必要的系统目录存在
-    mkdir -p /etc/caddy /var/log/caddy /var/lib/caddy
-}
-
-configure_caddy() {
-    step_header "配置 Caddy 反向代理"
-
-    if [ "$CADDY_ENABLED" != "true" ]; then
-        info "未配置域名，跳过 Caddy 配置"
-        return 0
-    fi
-
-    # 创建 Caddyfile
-    cat > /etc/caddy/Caddyfile << CADDY_EOF
-# ════════════════════════════════════════════════
-#  Caddyfile — Generated by Gitea Tools Manager
-#  Domain:  ${CADDY_DOMAIN}
-#  Backend: localhost:${GITEA_HTTP_PORT}
-#  Date:    $(date '+%Y-%m-%d %H:%M:%S')
-# ════════════════════════════════════════════════
-
-${CADDY_DOMAIN} {
-    # 日志
-    log {
-        output file /var/log/caddy/gitea.log
-        level INFO
-    }
-
-    # 反代到 Gitea
-    reverse_proxy localhost:${GITEA_HTTP_PORT} {
-        # 传递真实客户端IP
-        header_up X-Real-IP {remote_host}
-        header_up X-Forwarded-For {remote_host}
-        header_up X-Forwarded-Proto https
-        header_up X-Forwarded-Host ${CADDY_DOMAIN}
-
-        # 传输 WebSocket (Gitea 实时功能需要)
-        header_up Connection {http.request.header.Connection}
-    }
-
-    # 安全头
-    header {
-        X-Frame-Options "SAMEORIGIN"
-        X-Content-Type-Options "nosniff"
-        -Server
-    }
-
-    # 文件上传大小限制 (默认 500MB)
-    request_body {
-        max_size 500MB
-    }
-
-    # Let's Encrypt 证书邮箱
-    tls ${GITEA_ADMIN_EMAIL}
-}
-
-# HTTP → HTTPS 自动重定向
-http://${CADDY_DOMAIN} {
-    redir https://{host}{uri} permanent
-}
-CADDY_EOF
-
-    ok "Caddyfile 已生成: /etc/caddy/Caddyfile"
-
-    # 验证配置
-    if caddy validate --config /etc/caddy/Caddyfile 2>/dev/null; then
-        ok "Caddy 配置验证通过"
-    else
-        warn "Caddy 配置验证有警告，将继续"
-    fi
-
-    # 开放防火墙端口
-    info "检查防火墙规则..."
-    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
-        ufw allow 80/tcp comment "Caddy HTTP" 2>/dev/null || true
-        ufw allow 443/tcp comment "Caddy HTTPS" 2>/dev/null || true
-        ok "UFW 防火墙已开放 80/443 端口"
-    elif command -v firewall-cmd &>/dev/null && firewall-cmd --state 2>/dev/null | grep -q "running"; then
-        firewall-cmd --permanent --add-service=http --add-service=https 2>/dev/null || true
-        firewall-cmd --reload 2>/dev/null || true
-        ok "Firewalld 已开放 HTTP/HTTPS 服务"
-    else
-        info "未检测到防火墙，跳过端口开放（请手动确保 80/443 端口可访问）"
-    fi
-
-    # 创建 systemd 服务（如果通用方式安装）
-    if [ ! -f /etc/systemd/system/caddy.service ] && [ ! -f /lib/systemd/system/caddy.service ]; then
-        info "创建 Caddy systemd 服务..."
-        cat > /etc/systemd/system/caddy.service << 'SYSTEMD_CADDY'
-[Unit]
-Description=Caddy Web Server
-Documentation=https://caddyserver.com/docs/
-After=network.target network-online.target
-Requires=network-online.target
-
-[Service]
-Type=notify
-User=caddy
-Group=caddy
-ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile
-ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile
-TimeoutStopSec=5
-LimitNOFILE=1048576
-LimitNPROC=512
-PrivateTmp=true
-ProtectSystem=full
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-
-[Install]
-WantedBy=multi-user.target
-SYSTEMD_CADDY
-
-        # 创建 caddy 用户
-        if ! id caddy &>/dev/null; then
-            useradd --system --shell /bin/false --home-dir /var/lib/caddy caddy 2>/dev/null || true
-        fi
-        chown -R caddy:caddy /etc/caddy /var/log/caddy /var/lib/caddy 2>/dev/null || true
-    fi
-
-    systemctl daemon-reload
-    ok "Caddy 配置完成"
-}
-
-# ─── PostgreSQL 安装 ─────────────────────────────────────────────────────────────
-
-install_postgresql() {
-    step_header "安装与配置 PostgreSQL"
-
-    if command -v psql &>/dev/null; then
-        ok "PostgreSQL 已安装: $(psql --version 2>/dev/null | head -1)"
-        return 0
-    fi
-
-    case "$OS" in
-        debian)
-            info "从 apt 仓库安装 PostgreSQL..."
-            apt-get install -y -qq postgresql postgresql-client 2>/dev/null
-            ;;
-        rhel)
-            info "从 dnf 仓库安装 PostgreSQL..."
-            dnf install -y -q postgresql-server postgresql 2>/dev/null || \
-                yum install -y -q postgresql-server postgresql 2>/dev/null
-            # 初始化数据库
-            postgresql-setup --initdb 2>/dev/null || true
-            ;;
-        arch)
-            pacman -S --noconfirm --needed postgresql 2>/dev/null
-            # 初始化
-            if [ ! -d "$PG_DATA_DIR" ]; then
-                info "初始化 PostgreSQL 数据目录..."
-                mkdir -p "$PG_DATA_DIR"
-                chown postgres:postgres "$PG_DATA_DIR"
-                su - postgres -c "initdb -D ${PG_DATA_DIR}" 2>/dev/null || true
-            fi
-            ;;
-        *)
-            error "不支持的发行版，请手动安装 PostgreSQL"
-            return 1
-            ;;
-    esac
-
-    # 启动服务
-    info "启动 PostgreSQL 服务..."
-    if command -v systemctl &>/dev/null; then
-        systemctl enable postgresql 2>/dev/null || true
-        systemctl start postgresql 2>/dev/null || \
-            systemctl start postgresql-15 2>/dev/null || \
-            systemctl start postgresql-16 2>/dev/null || true
-    else
-        service postgresql start 2>/dev/null || true
-    fi
-
-    ok "PostgreSQL $(psql --version 2>/dev/null | grep -oP '\d+\.\d+' || echo '?') 安装完成"
-}
-
-configure_postgresql() {
-    step_header "配置 PostgreSQL 数据库与用户"
-
-    # 生成随机密码
-    if [ -z "$GITEA_DB_PASSWORD" ]; then
-        GITEA_DB_PASSWORD="$(openssl rand -base64 24 | tr -d '/+=')"
-    fi
-
-    info "创建数据库用户: ${GITEA_DB_USER}"
-    info "数据库名称:     ${GITEA_DB_NAME}"
-
-    # 切换为 postgres 用户执行 SQL
-    su - postgres -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='${GITEA_DB_USER}'\" 2>/dev/null" \
-        | grep -q 1 || {
-        su - postgres -c "psql -c \"SET password_encryption = 'scram-sha-256'; CREATE ROLE ${GITEA_DB_USER} WITH LOGIN PASSWORD '${GITEA_DB_PASSWORD}';\""
-    }
-
-    # 创建数据库
-    su - postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='${GITEA_DB_NAME}'\" 2>/dev/null" \
-        | grep -q 1 || {
-        su - postgres -c "psql -c \"CREATE DATABASE ${GITEA_DB_NAME} OWNER ${GITEA_DB_USER} ENCODING 'UTF8' LC_COLLATE='en_US.UTF-8' LC_CTYPE='en_US.UTF-8' TEMPLATE=template0;\""
-    }
-
-    # 授权
-    su - postgres -c "psql -c \"GRANT ALL PRIVILEGES ON DATABASE ${GITEA_DB_NAME} TO ${GITEA_DB_USER};\""
-    su - postgres -c "psql -c \"GRANT ALL ON SCHEMA public TO ${GITEA_DB_USER};\" -d ${GITEA_DB_NAME}" 2>/dev/null || true
-
-    # 确保 pg_hba.conf 使用 md5 认证
-    local pg_hba
-    pg_hba="$(su - postgres -c "psql -t -c 'SHOW hba_file;'" 2>/dev/null | tr -d ' ')" || true
-    if [ -n "$pg_hba" ] && [ -f "$pg_hba" ]; then
-        if ! grep -q "gitea" "$pg_hba" 2>/dev/null; then
-            info "更新 pg_hba.conf 认证策略..."
-            echo "# Gitea access" >> "$pg_hba"
-            echo "host    ${GITEA_DB_NAME}    ${GITEA_DB_USER}    127.0.0.1/32    scram-sha-256" >> "$pg_hba"
-            echo "host    ${GITEA_DB_NAME}    ${GITEA_DB_USER}    ::1/128         scram-sha-256" >> "$pg_hba"
-            systemctl reload postgresql 2>/dev/null || \
-                su - postgres -c "pg_ctl reload -D ${PG_DATA_DIR}" 2>/dev/null || true
-        fi
-    fi
-
-    # 测试连接
-    if PGPASSWORD="$GITEA_DB_PASSWORD" psql -h 127.0.0.1 -U "$GITEA_DB_USER" -d "$GITEA_DB_NAME" -c "SELECT 1;" &>/dev/null; then
-        ok "数据库连接测试通过"
-    else
-        warn "数据库连接测试失败，但将继续配置"
-    fi
-
-    # 保存密码到配置文件
-    save_config
-}
-
-# ─── Gitea 安装 ─────────────────────────────────────────────────────────────────
-
+# ──────────────────────────────────────────────────────────────
+# Gitea 安装
+# ──────────────────────────────────────────────────────────────
 fetch_gitea_version() {
-    # 获取最新版本号
     if [ "$GITEA_VERSION" = "latest" ]; then
-        info "获取 Gitea 最新版本..."
-        GITEA_VERSION=$(curl -sSL https://api.github.com/repos/go-gitea/gitea/releases/latest \
-            | grep -oP '"tag_name":\s*"\K[^"]+' | sed 's/^v//')
-        if [ -z "$GITEA_VERSION" ]; then
-            error "无法获取最新版本号，使用默认版本 1.22.0"
-            GITEA_VERSION="1.22.0"
-        fi
+        GITEA_VERSION="$(curl -sSL https://api.github.com/repos/go-gitea/gitea/releases/latest \
+            | grep -oP '"tag_name":\s*"\K[^"]+' | sed 's/^v//')"
+        [ -z "$GITEA_VERSION" ] && { _warn "无法获取最新版本，使用 1.22.0"; GITEA_VERSION="1.22.0"; }
     fi
-    info "Gitea 版本: v${GITEA_VERSION}"
 }
 
-download_gitea() {
-    step_header "下载 Gitea v${GITEA_VERSION}"
+install_gitea() {
+    _step "安装 Gitea"
 
-    local base_url="https://dl.gitea.com/gitea/${GITEA_VERSION}"
-    local binary_name="gitea-${GITEA_VERSION}-${OS_ID}-${ARCH}"
-    local gpg_url="${base_url}/${binary_name}.asc"
-    local checksum_url="${base_url}/gitea-${GITEA_VERSION}-${OS_ID}-${ARCH}.sha256"
-    local download_url="${base_url}/${binary_name}"
+    # ── 获取版本 ──
+    fetch_gitea_version
+    _info "目标版本: ${C_BCY}v${GITEA_VERSION}${C_RST}"
 
-    # 某些旧版本用 linux 前缀
-    if ! curl -sI "$download_url" 2>/dev/null | grep -q "200 OK"; then
-        download_url="${base_url}/gitea-${GITEA_VERSION}-linux-${ARCH}"
-        gpg_url="${base_url}/gitea-${GITEA_VERSION}-linux-${ARCH}.asc"
-    fi
-
-    info "下载地址: ${download_url}"
-    info "保存位置: ${GITEA_BIN}"
-
-    # 下载
-    curl -fSL# -o "${GITEA_BIN}.tmp" "$download_url" || {
-        error "下载失败!"
+    # ── 下载二进制 ──
+    local url="https://dl.gitea.com/gitea/${GITEA_VERSION}/gitea-${GITEA_VERSION}-linux-${ARCH}"
+    _info "下载 ${url}"
+    curl -fSL# -o "${GITEA_BIN}.tmp" "$url" || {
+        _err "下载失败!"
         return 1
     }
 
-    # 验证（可选）
-    if curl -fsSL "${checksum_url}" -o "/tmp/gitea-sha256" 2>/dev/null; then
-        local expected
-        expected=$(awk '{print $1}' /tmp/gitea-sha256)
-        local actual
-        actual=$(sha256sum "${GITEA_BIN}.tmp" | awk '{print $1}')
+    # SHA256 校验
+    local sha_url="https://dl.gitea.com/gitea/${GITEA_VERSION}/gitea-${GITEA_VERSION}-linux-${ARCH}.sha256"
+    if curl -fsSL "$sha_url" -o /tmp/gitea.sha256 2>/dev/null; then
+        local expected; expected="$(awk '{print $1}' /tmp/gitea.sha256)"
+        local actual; actual="$(sha256sum "${GITEA_BIN}.tmp" | awk '{print $1}')"
         if [ "$expected" = "$actual" ]; then
-            ok "SHA256 校验通过"
+            _ok "SHA256 校验通过"
         else
-            warn "SHA256 校验失败，但仍继续"
+            _warn "SHA256 不匹配，继续使用"
         fi
-        rm -f /tmp/gitea-sha256
+        rm -f /tmp/gitea.sha256
     fi
 
-    # 安装
     chmod +x "${GITEA_BIN}.tmp"
     mv "${GITEA_BIN}.tmp" "$GITEA_BIN"
+    _ok "Gitea 二进制安装到 ${GITEA_BIN}"
 
-    ok "Gitea v${GITEA_VERSION} 下载安装完成"
-}
-
-setup_gitea_user() {
-    step_header "创建 Gitea 系统用户"
-
-    if id "$GITEA_USER" &>/dev/null; then
-        ok "用户 ${GITEA_USER} 已存在"
-        return 0
+    # ── 创建系统用户 ──
+    if ! id "$GITEA_USER" &>/dev/null; then
+        useradd --system --home-dir "$GITEA_HOME" --shell /bin/bash --comment "Gitea" "$GITEA_USER" 2>/dev/null || \
+            adduser --system --home "$GITEA_HOME" --group "$GITEA_USER" 2>/dev/null
+        _ok "系统用户 ${GITEA_USER} 已创建"
+    else
+        _info "用户 ${GITEA_USER} 已存在"
     fi
 
-    case "$OS" in
-        debian|rhel|arch)
-            useradd --system --create-home --home-dir "$GITEA_HOME" \
-                --shell /bin/bash --comment "Gitea user" "$GITEA_USER" 2>/dev/null || \
-                adduser --system --home "$GITEA_HOME" --group "$GITEA_USER" 2>/dev/null
-            ;;
-        *)
-            adduser --system --home "$GITEA_HOME" --group "$GITEA_USER" 2>/dev/null || true
-            ;;
-    esac
-
-    ok "用户 ${GITEA_USER} 创建完成"
-}
-
-setup_directories() {
-    step_header "创建 Gitea 目录结构"
-
-    mkdir -p "${GITEA_HOME}/custom" \
-             "${GITEA_HOME}/data" \
-             "${GITEA_HOME}/log" \
-             "${GITEA_HOME}/repositories" \
-             "${GITEA_HOME}/gitea-repositories" \
-             "${GITEA_CUSTOM}/conf" \
-             /etc/gitea
-
+    # ── 目录结构 ──
+    mkdir -p "${GITEA_HOME}"/{custom/conf,data,log,repositories} /etc/gitea
     chown -R "${GITEA_USER}:${GITEA_USER}" "$GITEA_HOME" /etc/gitea
     chmod 750 "$GITEA_HOME"
+    _ok "目录结构就绪"
 
-    ok "目录结构创建完成"
+    # ── systemd 服务 ──
+    cat > /etc/systemd/system/gitea.service << SYSTEMD
+[Unit]
+Description=Gitea (Git Service)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=${GITEA_USER}
+Group=${GITEA_USER}
+WorkingDirectory=${GITEA_HOME}
+ExecStart=${GITEA_BIN} web --config ${GITEA_CONF}
+Restart=always
+RestartSec=5s
+Environment=USER=${GITEA_USER}
+Environment=HOME=${GITEA_HOME}
+Environment=GITEA_WORK_DIR=${GITEA_HOME}
+LimitNOFILE=65536
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target
+SYSTEMD
+    systemctl daemon-reload
+    systemctl enable gitea 2>/dev/null || true
+    _ok "systemd 服务 gitea.service 已创建"
+
+    _log INFO "gitea ${GITEA_VERSION} installed"
 }
 
-generate_gitea_config() {
-    step_header "生成 Gitea 配置文件"
+# ──────────────────────────────────────────────────────────────
+# PostgreSQL 安装
+# ──────────────────────────────────────────────────────────────
+install_postgresql() {
+    _step "安装 PostgreSQL 数据库"
 
-    local secret_key
-    secret_key="$(openssl rand -base64 48 | tr -d '/+=')"
+    if command -v psql &>/dev/null; then
+        _info "PostgreSQL 已安装: $(psql --version 2>/dev/null | head -1)"
+    else
+        case "$OS" in
+            debian)
+                apt-get install -y -qq postgresql postgresql-client 2>/dev/null ;;
+            rhel)
+                dnf install -y -q postgresql-server postgresql 2>/dev/null || \
+                    yum install -y -q postgresql-server postgresql 2>/dev/null
+                postgresql-setup --initdb 2>/dev/null || true ;;
+            arch)
+                pacman -S --noconfirm --needed postgresql 2>/dev/null
+                if [ ! -d /var/lib/postgres/data ]; then
+                    su - postgres -c "initdb -D /var/lib/postgres/data" 2>/dev/null || true
+                fi ;;
+        esac
+        _ok "PostgreSQL 安装完成"
+    fi
 
-    cat > "$GITEA_CONFIG" << EOF
-; ════════════════════════════════════════════════
-;  Gitea Configuration — Generated by Tools Manager
-;  Version: ${GITEA_VERSION}
-;  Date:     $(date '+%Y-%m-%d %H:%M:%S')
-; ════════════════════════════════════════════════
+    # 启动
+    systemctl enable postgresql 2>/dev/null || true
+    systemctl start postgresql 2>/dev/null || {
+        # 尝试特定版本的服务名
+        local svc; svc="$(systemctl list-units --type=service --all 2>/dev/null \
+            | grep -oP 'postgresql.*\.service' | head -1 || true)"
+        [ -n "$svc" ] && systemctl start "$svc" 2>/dev/null || true
+    }
+    _ok "PostgreSQL 服务已启动"
 
-; ── 全局设置 ─────────────────────────────────────
+    # ── 生成密码 ──
+    if [ -z "$PG_PASS" ]; then
+        PG_PASS="$(openssl rand -base64 24 | tr -d '/+=')"
+    fi
+
+    # ── 创建角色 ──
+    _info "创建数据库用户 ${PG_USER} ..."
+    su - postgres -c "psql -tc \"SELECT 1 FROM pg_roles WHERE rolname='${PG_USER}'\"" 2>/dev/null \
+        | grep -q 1 || {
+        su - postgres -c "psql -c \"SET password_encryption='scram-sha-256'; CREATE ROLE ${PG_USER} LOGIN PASSWORD '${PG_PASS}';\""
+    }
+
+    # ── 创建数据库 ──
+    _info "创建数据库 ${PG_NAME} ..."
+    su - postgres -c "psql -tc \"SELECT 1 FROM pg_database WHERE datname='${PG_NAME}'\"" 2>/dev/null \
+        | grep -q 1 || {
+        su - postgres -c "psql -c \"CREATE DATABASE ${PG_NAME} OWNER ${PG_USER} ENCODING 'UTF8' LC_COLLATE='en_US.UTF-8' LC_CTYPE='en_US.UTF-8' TEMPLATE template0;\""
+    }
+
+    su - postgres -c "psql -c 'GRANT ALL PRIVILEGES ON DATABASE ${PG_NAME} TO ${PG_USER};'"
+    su - postgres -c "psql -c 'GRANT ALL ON SCHEMA public TO ${PG_USER};' -d ${PG_NAME}" 2>/dev/null || true
+
+    # ── pg_hba.conf ──
+    local hba; hba="$(su - postgres -c "psql -t -c 'SHOW hba_file;'" 2>/dev/null | tr -d ' ')" || true
+    if [ -n "$hba" ] && [ -f "$hba" ]; then
+        if ! grep -qF "gitea" "$hba" 2>/dev/null; then
+            _info "配置 pg_hba.conf 认证..."
+            {
+                echo ""
+                echo "# Gitea — managed by gitea-manager"
+                echo "host    ${PG_NAME}    ${PG_USER}    127.0.0.1/32    scram-sha-256"
+                echo "host    ${PG_NAME}    ${PG_USER}    ::1/128         scram-sha-256"
+            } >> "$hba"
+            systemctl reload postgresql 2>/dev/null || \
+                su - postgres -c "pg_ctl reload -D /var/lib/postgresql/*/main/" 2>/dev/null || true
+            _ok "pg_hba.conf 已更新 (scram-sha-256)"
+        fi
+    fi
+
+    # ── 连接测试 ──
+    if PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" -d "$PG_NAME" -c "SELECT 1;" &>/dev/null; then
+        _ok "数据库连接测试通过"
+    else
+        _warn "数据库连接测试失败，将继续 (检查 pg_hba.conf)"
+    fi
+
+    _log INFO "postgresql configured: ${PG_USER}@${PG_HOST}:${PG_PORT}/${PG_NAME}"
+}
+
+# ──────────────────────────────────────────────────────────────
+# Gitea 配置生成
+# ──────────────────────────────────────────────────────────────
+write_gitea_config() {
+    _step "生成 Gitea 配置文件"
+
+    local secret; secret="$(openssl rand -base64 48 | tr -d '/+=')"
+    local itoken; itoken="$(openssl rand -base64 36 | tr -d '/+=')"
+    local domain root_url
+    if [ "$CADDY_ENABLE" = "true" ] && [ -n "$CADDY_DOMAIN" ]; then
+        domain="$CADDY_DOMAIN"
+        root_url="https://${CADDY_DOMAIN}/"
+    else
+        domain="$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost')"
+        root_url="http://${domain}:${GITEA_LISTEN}/"
+    fi
+    ADMIN_MAIL="${ADMIN_MAIL:-admin@${domain}}"
+
+    cat > "$GITEA_CONF" << EOF
+; ───────────────────────────────────────────────────
+;  Gitea Configuration — Gitea Tools Manager v${SCRIPT_VERSION}
+;  Generated: $(date '+%F %T')
+; ───────────────────────────────────────────────────
+
 APP_NAME   = Gitea: Git with a cup of tea
 RUN_USER   = ${GITEA_USER}
 RUN_MODE   = prod
@@ -773,36 +388,37 @@ DEFAULT_BRANCH = main
 
 [server]
 PROTOCOL         = http
-DOMAIN           = ${GITEA_DOMAIN}
-ROOT_URL         = ${GITEA_ROOT_URL}
+DOMAIN           = ${domain}
+ROOT_URL         = ${root_url}
 HTTP_ADDR        = 0.0.0.0
-HTTP_PORT        = ${GITEA_HTTP_PORT}
-SSH_DOMAIN       = ${GITEA_DOMAIN}
-SSH_PORT         = ${GITEA_SSH_PORT}
-SSH_LISTEN_PORT  = ${GITEA_SSH_PORT}
+HTTP_PORT        = ${GITEA_LISTEN}
+SSH_DOMAIN       = ${domain}
+SSH_PORT         = 22
+SSH_LISTEN_PORT  = 22
 START_SSH_SERVER = true
 LANDING_PAGE     = explore
 
 [database]
 DB_TYPE  = postgres
-HOST     = ${GITEA_DB_HOST}
-NAME     = ${GITEA_DB_NAME}
-USER     = ${GITEA_DB_USER}
-PASSWD   = ${GITEA_DB_PASSWORD}
+HOST     = ${PG_HOST}:${PG_PORT}
+NAME     = ${PG_NAME}
+USER     = ${PG_USER}
+PASSWD   = ${PG_PASS}
 SSL_MODE = disable
+LOG_SQL  = false
 
 [security]
 INSTALL_LOCK       = true
-SECRET_KEY         = ${secret_key}
-INTERNAL_TOKEN     = $(openssl rand -base64 36 | tr -d '/+=')
+SECRET_KEY         = ${secret}
+INTERNAL_TOKEN     = ${itoken}
 PASSWORD_HASH_ALGO = pbkdf2
 
 [service]
-DISABLE_REGISTRATION        = false
-REQUIRE_SIGNIN_VIEW         = false
-REGISTER_EMAIL_CONFIRM      = false
-ENABLE_NOTIFY_MAIL          = false
-DEFAULT_KEEP_EMAIL_PRIVATE  = false
+DISABLE_REGISTRATION       = false
+REQUIRE_SIGNIN_VIEW        = false
+REGISTER_EMAIL_CONFIRM     = false
+ENABLE_NOTIFY_MAIL         = false
+DEFAULT_KEEP_EMAIL_PRIVATE = false
 
 [session]
 PROVIDER = db
@@ -820,745 +436,518 @@ DEFAULT_ACTIONS_URL = github
 SHOW_FOOTER_VERSION = true
 EOF
 
-    chown "${GITEA_USER}:${GITEA_USER}" "$GITEA_CONFIG"
-    chmod 640 "$GITEA_CONFIG"
-
-    ok "配置文件已生成: ${GITEA_CONFIG}"
+    chown "${GITEA_USER}:${GITEA_USER}" "$GITEA_CONF"
+    chmod 640 "$GITEA_CONF"
+    _ok "配置文件 → ${GITEA_CONF}"
+    _log INFO "gitea config written"
 }
 
-create_systemd_service() {
-    step_header "创建 Systemd 服务"
+# ──────────────────────────────────────────────────────────────
+# Caddy 安装 & 反代配置
+# ──────────────────────────────────────────────────────────────
+prompt_domain() {
+    _step "域名配置"
 
-    cat > /etc/systemd/system/gitea.service << EOF
-[Unit]
-Description=Gitea (Git with a cup of tea)
-After=network.target postgresql.service
-Wants=postgresql.service
+    printf "\n  ${C_WHT}是否需要通过 Caddy 配置 HTTPS 反向代理？${C_RST}\n"
+    printf "  ${C_DIM}Caddy 将自动申请 Let's Encrypt SSL 证书，实现 HTTPS 安全访问。${C_RST}\n"
+    printf "  ${C_DIM}确保域名 DNS 已解析到此服务器 IP。${C_RST}\n\n"
 
-[Service]
-Type=simple
-User=${GITEA_USER}
-Group=${GITEA_USER}
-WorkingDirectory=${GITEA_WORK_DIR}
-ExecStart=${GITEA_BIN} web --config ${GITEA_CONFIG}
-Restart=always
-RestartSec=5
-Environment=USER=${GITEA_USER}
-Environment=HOME=${GITEA_HOME}
-Environment=GITEA_WORK_DIR=${GITEA_WORK_DIR}
-LimitNOFILE=65536
+    CADDY_DOMAIN="$(_ask "  ${C_BCY}域名 (留空跳过):${C_RST} " "")"
 
-[Install]
-WantedBy=multi-user.target
-EOF
+    if [ -z "$CADDY_DOMAIN" ]; then
+        _info "跳过反向代理 — Gitea 将通过 HTTP 端口 ${GITEA_LISTEN} 访问"
+        CADDY_ENABLE="false"
+        return 0
+    fi
+
+    if ! _valid_domain "$CADDY_DOMAIN"; then
+        _err "域名格式无效: ${CADDY_DOMAIN}"
+        CADDY_DOMAIN=""
+        CADDY_ENABLE="false"
+        return 0
+    fi
+
+    CADDY_ENABLE="true"
+    printf "\n"
+    printf "  ${C_WHT}域名:${C_RST}    ${C_BCY}%s${C_RST}\n" "$CADDY_DOMAIN"
+    printf "  ${C_WHT}访问地址:${C_RST}  ${C_BCY}https://%s${C_RST}\n" "$CADDY_DOMAIN"
+    printf "  ${C_WHT}SSL 证书:${C_RST}  ${C_DIM}Let's Encrypt 自动管理${C_RST}\n"
+    printf "\n"
+
+    local confirm; confirm="$(_ask "  ${C_WHT}确认?${C_RST} ${C_DIM}[Y/n]${C_RST} " "y")"
+    if [ "${confirm,,}" = "n" ]; then
+        CADDY_ENABLE="false"; CADDY_DOMAIN=""
+        _info "已取消域名配置"
+        return 0
+    fi
+
+    _ok "域名配置完成: ${CADDY_DOMAIN}"
+    _log INFO "domain: ${CADDY_DOMAIN}"
+}
+
+install_caddy() {
+    _step "安装 Caddy 反向代理"
+
+    if [ "$CADDY_ENABLE" != "true" ]; then
+        _info "未配置域名，跳过"
+        return 0
+    fi
+
+    if command -v caddy &>/dev/null; then
+        _info "Caddy 已安装: $(caddy version 2>/dev/null | head -1)"
+    else
+        case "$OS" in
+            debian)
+                curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
+                    | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg 2>/dev/null
+                curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
+                    | tee /etc/apt/sources.list.d/caddy-stable.list >/dev/null
+                apt-get update -qq 2>/dev/null
+                apt-get install -y -qq caddy 2>/dev/null
+                ;;
+            rhel)
+                dnf install -y -q 'dnf-command(copr)' 2>/dev/null || true
+                dnf copr enable -y @caddy/caddy 2>/dev/null || true
+                dnf install -y -q caddy 2>/dev/null
+                ;;
+            arch)
+                pacman -S --noconfirm --needed caddy 2>/dev/null
+                ;;
+        esac
+        _ok "Caddy 安装完成"
+    fi
+
+    # Caddyfile
+    cat > /etc/caddy/Caddyfile << CADDYFILE
+# ───────────────────────────────────────────────
+#  Gitea reverse proxy — generated by gitea-manager
+# ───────────────────────────────────────────────
+
+${CADDY_DOMAIN} {
+    log {
+        output file /var/log/caddy/gitea.log
+        level INFO
+    }
+
+    reverse_proxy localhost:${GITEA_LISTEN} {
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto https
+        header_up X-Forwarded-Host ${CADDY_DOMAIN}
+        header_up Connection {http.request.header.Connection}
+    }
+
+    header {
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+        -Server
+    }
+
+    request_body {
+        max_size 500MB
+    }
+
+    tls ${ADMIN_MAIL}
+}
+CADDYFILE
+    _ok "Caddyfile → /etc/caddy/Caddyfile"
+
+    # 验证配置
+    if caddy validate --config /etc/caddy/Caddyfile &>/dev/null; then
+        _ok "Caddy 配置验证通过"
+    else
+        _warn "Caddy 配置验证警告 (检查域名 DNS)"
+    fi
+
+    # 防火墙
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        ufw allow 80/tcp comment "Caddy HTTP" 2>/dev/null || true
+        ufw allow 443/tcp comment "Caddy HTTPS" 2>/dev/null || true
+        _ok "UFW 防火墙已开放 80/443"
+    elif command -v firewall-cmd &>/dev/null && firewall-cmd --state 2>/dev/null | grep -q "running"; then
+        firewall-cmd --permanent --add-service=http --add-service=https 2>/dev/null || true
+        firewall-cmd --reload 2>/dev/null || true
+        _ok "Firewalld 已开放 HTTP/HTTPS"
+    fi
 
     systemctl daemon-reload
-    systemctl enable gitea 2>/dev/null || true
-
-    ok "Systemd 服务已创建: gitea.service"
+    systemctl enable caddy 2>/dev/null || true
+    _log INFO "caddy configured for ${CADDY_DOMAIN}"
 }
 
-# ─── Gitea Actions Runner ────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
+# 启动服务
+# ──────────────────────────────────────────────────────────────
+start_all_services() {
+    _step "启动服务"
+
+    # PostgreSQL (应该已在运行)
+    systemctl is-active --quiet postgresql 2>/dev/null || \
+        systemctl is-active --quiet postgresql-* 2>/dev/null || {
+        _info "启动 PostgreSQL..."
+        systemctl start postgresql 2>/dev/null || true
+    }
+
+    # Gitea
+    _info "启动 Gitea..."
+    systemctl restart gitea
+
+    # 健康检查
+    local retry=0 max=15
+    while [ $retry -lt $max ]; do
+        if curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${GITEA_LISTEN}" 2>/dev/null \
+            | grep -qE "2[0-9]{2}|3[0-9]{2}|40[134]"; then
+            _ok "Gitea 就绪 → http://127.0.0.1:${GITEA_LISTEN}"
+            break
+        fi
+        retry=$((retry + 1))
+        [ $retry -eq $max ] && {
+            _err "Gitea 未能在 ${max}x2 秒内启动"
+            _info "运行诊断..."
+            printf "  ${C_DIM}"
+            timeout 5 su -s /bin/bash "$GITEA_USER" -c "GITEA_WORK_DIR=${GITEA_HOME} ${GITEA_BIN} web --config ${GITEA_CONF}" 2>&1 | tail -15 || true
+            printf "${C_RST}"
+        }
+        sleep 2
+    done
+
+    # Caddy
+    if [ "$CADDY_ENABLE" = "true" ]; then
+        _info "启动 Caddy..."
+        systemctl restart caddy 2>/dev/null || true
+        sleep 2
+        if systemctl is-active --quiet caddy 2>/dev/null; then
+            _ok "Caddy 就绪 → https://${CADDY_DOMAIN}"
+        else
+            _warn "Caddy 启动失败: journalctl -u caddy -n 10"
+        fi
+    fi
+}
+
+# ──────────────────────────────────────────────────────────────
+# 管理员 & Runner
+# ──────────────────────────────────────────────────────────────
+create_admin() {
+    _step "创建管理员账户"
+
+    if [ -z "$ADMIN_PASS" ]; then
+        ADMIN_PASS="$(openssl rand -base64 12 | tr -d '/+=')"
+    fi
+
+    _info "管理员: ${ADMIN_USER} / ${ADMIN_MAIL}"
+
+    su - "$GITEA_USER" -c "GITEA_WORK_DIR=${GITEA_HOME} ${GITEA_BIN} admin user create \
+        --admin --username '${ADMIN_USER}' --password '${ADMIN_PASS}' \
+        --email '${ADMIN_MAIL}' --config '${GITEA_CONF}' \
+        --must-change-password=false" 2>/dev/null && {
+        _ok "管理员 ${ADMIN_USER} 创建成功"
+    } || {
+        _warn "管理员可能已存在，跳过"
+    }
+
+    _log INFO "admin: ${ADMIN_USER} / ${ADMIN_MAIL}"
+}
 
 setup_actions_runner() {
-    step_header "配置 Gitea Actions Runner"
+    _step "配置 Actions Runner"
 
-    if [ "$ACTIONS_RUNNER_ENABLED" != "true" ]; then
-        info "Actions Runner 已禁用，跳过"
+    if [ "$RUNNER_ENABLE" != "true" ]; then
+        _info "已禁用，跳过"
         return 0
     fi
 
     if ! command -v docker &>/dev/null; then
-        warn "Docker 未安装 — Actions Runner 需要 Docker 环境"
+        _warn "Docker 未安装，跳过 Runner 配置"
         return 0
     fi
-    ok "Docker 已就绪"
 
-    # 将 gitea 用户加入 docker 组
     usermod -aG docker "$GITEA_USER" 2>/dev/null || true
 
-    # 下载并安装 act_runner
-    info "下载 Gitea Actions Runner..."
-    local runner_arch="$ARCH"
-    local runner_version="$ACTIONS_RUNNER_VERSION"
+    # 下载 act_runner
+    local runner_ver; runner_ver="$(curl -sSL https://gitea.com/api/v1/repos/gitea/act_runner/releases/latest 2>/dev/null \
+        | grep -oP '"tag_name":\s*"\K[^"]+' | sed 's/^v//')"
+    if [ -z "$runner_ver" ]; then runner_ver="0.2.11"; fi
 
-    if [ "$runner_version" = "latest" ]; then
-        runner_version=$(curl -sSL https://gitea.com/api/v1/repos/gitea/act_runner/releases/latest \
-            | grep -oP '"tag_name":\s*"\K[^"]+' | sed 's/^v//')
-        if [ -z "$runner_version" ]; then runner_version="0.2.11"; fi
-    fi
+    local rarch="$ARCH"
+    case "$rarch" in amd64|arm64) ;; arm-6) rarch="armv6" ;; *) rarch="amd64" ;; esac
 
-    # 架构映射
-    case "$runner_arch" in
-        amd64)  runner_arch="amd64" ;;
-        arm64)  runner_arch="arm64" ;;
-        arm-5)  runner_arch="armv5" ;;
-        arm-6)  runner_arch="armv6" ;;
-        *)      runner_arch="amd64" ;;
-    esac
-
-    local runner_url="https://gitea.com/gitea/act_runner/releases/download/v${runner_version}/act_runner-${runner_version}-linux-${runner_arch}"
-    curl -fsSL -o /usr/local/bin/act_runner "$runner_url" 2>/dev/null || {
-        # 尝试备用地址
-        curl -fsSL -o /usr/local/bin/act_runner \
-            "https://dl.gitea.com/act_runner/${runner_version}/act_runner-${runner_version}-linux-${runner_arch}" 2>/dev/null || true
-    }
-    chmod +x /usr/local/bin/act_runner 2>/dev/null || true
-
-    if [ -x /usr/local/bin/act_runner ]; then
-        ok "Actions Runner v${runner_version} 安装完成"
-    else
-        warn "Actions Runner 下载失败，请稍后手动安装"
+    local runner_url="https://gitea.com/gitea/act_runner/releases/download/v${runner_ver}/act_runner-${runner_ver}-linux-${rarch}"
+    curl -fsSL -o /usr/local/bin/act_runner "$runner_url" 2>/dev/null && {
+        chmod +x /usr/local/bin/act_runner
+        _ok "act_runner v${runner_ver} 已安装"
+    } || {
+        _warn "act_runner 下载失败，可稍后手动安装"
         return 0
-    fi
+    }
 
-    # 生成 runner 配置
-    local runner_config="${GITEA_HOME}/.runner"
-    mkdir -p "$runner_config"
-
-    # 注册 Runner（需要在 Gitea 运行后执行）
-    # 创建注册脚本
-    cat > "${GITEA_HOME}/register-runner.sh" << 'REGISTER'
+    # 注册脚本
+    mkdir -p "${GITEA_HOME}/.runner"
+    cat > "${GITEA_HOME}/register-runner.sh" << 'REGSCRIPT'
 #!/usr/bin/env bash
-# Gitea Runner 注册脚本
-# 在 Gitea 启动后运行此脚本获取 Runner Token 并注册
-
+# Gitea Actions Runner 注册脚本
 set -euo pipefail
-
-GITEA_URL="http://localhost:${GITEA_HTTP_PORT:-3000}"
-RUNNER_CONFIG="/var/lib/gitea/.runner"
-RUNNER_LABELS="${ACTIONS_RUNNER_LABELS:-ubuntu-latest:docker://node:20-bullseye}"
-
-echo "请在 Gitea 管理后台获取 Runner Token:"
-echo "  Site Administration → Actions → Runners → Create new Runner"
-echo ""
-read -rp "请输入 Runner Registration Token: " TOKEN < /dev/tty
-
-if [ -z "$TOKEN" ]; then
-    echo "错误: Token 不能为空"
-    exit 1
-fi
-
-/usr/local/bin/act_runner register \
-    --no-interactive \
-    --instance "$GITEA_URL" \
-    --token "$TOKEN" \
-    --name "gitea-runner-$(hostname)" \
-    --labels "$RUNNER_LABELS" \
-    --config "${RUNNER_CONFIG}/config.yaml"
-
-echo "Runner 注册成功!"
-echo "配置文件: ${RUNNER_CONFIG}/config.yaml"
-REGISTER
-
+GITEA_URL="${GITEA_URL:-http://localhost:3000}"
+echo "请在 Gitea 后台获取 Runner Token: 站点管理 → Actions → Runners → 创建 Runner"
+read -rp "Token: " TOKEN < /dev/tty
+[ -z "$TOKEN" ] && { echo "Token 不能为空"; exit 1; }
+exec /usr/local/bin/act_runner register --no-interactive \
+    --instance "$GITEA_URL" --token "$TOKEN" \
+    --name "runner-$(hostname)" \
+    --labels "ubuntu-latest:docker://node:20-bullseye,ubuntu-22.04:docker://catthehacker/ubuntu:act-22.04"
+REGSCRIPT
     chmod +x "${GITEA_HOME}/register-runner.sh"
-    chown "${GITEA_USER}:${GITEA_USER}" -R "$runner_config"
-
-    # 创建 Runner systemd 服务（延迟启动，等 Gitea 注册完）
-    cat > /etc/systemd/system/gitea-actions-runner.service << EOF
-[Unit]
-Description=Gitea Actions Runner
-After=gitea.service docker.service
-Wants=gitea.service docker.service
-
-[Service]
-Type=simple
-User=${GITEA_USER}
-Group=${GITEA_USER}
-WorkingDirectory=${GITEA_HOME}
-ExecStart=/usr/local/bin/act_runner daemon --config ${GITEA_HOME}/.runner/config.yaml
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-    systemctl daemon-reload
-    ok "Actions Runner 配置完成 (待注册)"
-    info "安装后运行: ${GITEA_HOME}/register-runner.sh"
+    chown -R "${GITEA_USER}:${GITEA_USER}" "${GITEA_HOME}/.runner"
+    _info "注册脚本: ${GITEA_HOME}/register-runner.sh"
 }
 
-# ─── Gitea 管理用户 ──────────────────────────────────────────────────────────────
-
-create_admin_user() {
-    step_header "创建 Gitea 管理员用户"
-
-    if [ -z "$GITEA_ADMIN_PASSWORD" ]; then
-        GITEA_ADMIN_PASSWORD="$(openssl rand -base64 16 | tr -d '/+=')"
-    fi
-
-    info "管理员: ${GITEA_ADMIN_USER}"
-    info "邮箱:    ${GITEA_ADMIN_EMAIL}"
-
-    # 使用 gitea CLI 创建管理员
-    su - "$GITEA_USER" -c "GITEA_WORK_DIR=${GITEA_WORK_DIR} ${GITEA_BIN} admin user create \
-        --admin \
-        --username '${GITEA_ADMIN_USER}' \
-        --password '${GITEA_ADMIN_PASSWORD}' \
-        --email '${GITEA_ADMIN_EMAIL}' \
-        --config '${GITEA_CONFIG}' \
-        --must-change-password=false" 2>/dev/null || {
-        warn "管理员可能已存在，跳过创建"
-        return 0
-    }
-
-    ok "管理员用户创建完成"
-}
-
-# ─── 启动服务 ───────────────────────────────────────────────────────────────────
-
-start_services() {
-    step_header "启动 Gitea 服务"
-
-    info "启动 Gitea..."
-    systemctl stop gitea 2>/dev/null || true
-
-    # 先用 timeout 直接运行 gitea 验证配置，捕获启动错误
-    info "验证 Gitea 配置与数据库连接..."
-    local gitea_err
-    gitea_err=$(timeout 10 su -s /bin/bash "$GITEA_USER" -c "GITEA_WORK_DIR=${GITEA_WORK_DIR} ${GITEA_BIN} web --config ${GITEA_CONFIG}" 2>&1) || true
-
-    if echo "$gitea_err" | grep -qi "server started\|listening\|starting gitea on pid\|gracefully"; then
-        ok "Gitea 配置验证通过"
-    elif [ -n "$gitea_err" ]; then
-        # 检查是否有真正的错误
-        if echo "$gitea_err" | grep -qiE "fail|error|panic|fatal|refused|unknown|invalid"; then
-            error "Gitea 启动失败，错误信息:"
-            echo ""
-            echo -e "  ${C[R]}┌─── Gitea 启动错误 ────────────────────────────────────────────────┐${C[NC]}"
-            echo "$gitea_err" | head -20 | while IFS= read -r line; do
-                echo -e "  ${C[RD]}│${C[NC]} ${C[W]}$line${C[NC]}"
-            done
-            echo -e "  ${C[R]}└──────────────────────────────────────────────────────────────────────┘${C[NC]}"
-            echo ""
-
-            # 常见错误诊断
-            if echo "$gitea_err" | grep -qi "refused\|connect.*reject\|no route"; then
-                warn "诊断: PostgreSQL 连接被拒绝 — 检查数据库服务状态和 pg_hba.conf"
-            elif echo "$gitea_err" | grep -qi "authentication\|password\|scram\|md5"; then
-                warn "诊断: 数据库认证失败 — 检查密码和 pg_hba.conf 认证方式"
-            elif echo "$gitea_err" | grep -qi "unknown.*section\|invalid.*config\|parse.*error"; then
-                warn "诊断: 配置文件语法错误 — 检查 ${GITEA_CONFIG}"
-            elif echo "$gitea_err" | grep -qi "permission\|access.*denied\|EACCES"; then
-                warn "诊断: 文件权限错误 — 检查目录权限和 SELinux"
-            fi
-
-            info "手动排查命令:"
-            echo "    su - ${GITEA_USER} -c 'GITEA_WORK_DIR=${GITEA_WORK_DIR} ${GITEA_BIN} web --config ${GITEA_CONFIG}' | head -50"
-            echo "    journalctl -u gitea -f"
-            echo "    PGPASSWORD='***' psql -h 127.0.0.1 -U ${GITEA_DB_USER} -d ${GITEA_DB_NAME} -c 'SELECT 1;'"
-            return 1
-        fi
-    fi
-
-    # 启动服务
-    systemctl restart gitea
-
-    # 等待服务就绪
-    local max_retry=15
-    local retry=0
-    info "等待 Gitea HTTP 端口 ${GITEA_HTTP_PORT} 就绪..."
-    while [ $retry -lt $max_retry ]; do
-        if curl -s -o /dev/null -w "%{http_code}" "http://localhost:${GITEA_HTTP_PORT}" 2>/dev/null \
-            | grep -qE "2[0-9][0-9]|3[0-9][0-9]|401|404"; then
-            ok "Gitea 服务已就绪 → http://localhost:${GITEA_HTTP_PORT}"
-            return 0
-        fi
-        sleep 2
-        retry=$((retry + 1))
-        progress "$retry" "$max_retry" "等待 HTTP 响应"
-    done
-
-    warn "Gitea 启动超时!"
-    journalctl -u gitea --no-pager -n 15 2>/dev/null | while IFS= read -r line; do
-        echo -e "  ${C[W]}[journal]${C[NC]} $line"
-    done || true
-    info "手动排查: journalctl -u gitea -f"
-}
-
-start_caddy() {
-    if [ "$CADDY_ENABLED" != "true" ]; then
-        return 0
-    fi
-
-    step_header "启动 Caddy 反向代理"
-
-    info "启动 Caddy..."
-    if systemctl is-active --quiet caddy 2>/dev/null; then
-        systemctl reload caddy 2>/dev/null || systemctl restart caddy
-    else
-        systemctl enable caddy 2>/dev/null || true
-        systemctl start caddy 2>/dev/null || true
-    fi
-
-    # 等待 Caddy 就绪
-    sleep 3
-    if systemctl is-active --quiet caddy 2>/dev/null; then
-        ok "Caddy 已启动 — 监听 80/443 端口"
-        ok "访问地址: ${C[GD]}https://${CADDY_DOMAIN}${C[W]}"
-    else
-        warn "Caddy 启动失败，请检查日志: journalctl -u caddy -f"
-    fi
-}
-
-# ─── 配置持久化 ─────────────────────────────────────────────────────────────────
-
+# ──────────────────────────────────────────────────────────────
+# 配置持久化
+# ──────────────────────────────────────────────────────────────
 save_config() {
     cat > "$CONFIG_FILE" << EOF
-# ════════════════════════════════════════════════
-# Gitea Tools Manager Configuration
-# Generated: $(date '+%Y-%m-%d %H:%M:%S')
-# ════════════════════════════════════════════════
-
+# Gitea Tools Manager — saved $(date '+%F %T')
 GITEA_VERSION=${GITEA_VERSION}
 GITEA_USER=${GITEA_USER}
 GITEA_HOME=${GITEA_HOME}
 GITEA_BIN=${GITEA_BIN}
-GITEA_CONFIG=${GITEA_CONFIG}
-GITEA_HTTP_PORT=${GITEA_HTTP_PORT}
-GITEA_DOMAIN=${GITEA_DOMAIN}
-GITEA_ROOT_URL=${GITEA_ROOT_URL}
-
-GITEA_DB_TYPE=${GITEA_DB_TYPE}
-GITEA_DB_HOST=${GITEA_DB_HOST}
-GITEA_DB_NAME=${GITEA_DB_NAME}
-GITEA_DB_USER=${GITEA_DB_USER}
-GITEA_DB_PASSWORD=${GITEA_DB_PASSWORD}
-
-GITEA_ADMIN_USER=${GITEA_ADMIN_USER}
-GITEA_ADMIN_PASSWORD=${GITEA_ADMIN_PASSWORD}
-GITEA_ADMIN_EMAIL=${GITEA_ADMIN_EMAIL}
-
-ACTIONS_RUNNER_ENABLED=${ACTIONS_RUNNER_ENABLED}
-ACTIONS_RUNNER_VERSION=${ACTIONS_RUNNER_VERSION}
-
-CADDY_ENABLED=${CADDY_ENABLED}
+GITEA_CONF=${GITEA_CONF}
+GITEA_LISTEN=${GITEA_LISTEN}
+PG_HOST=${PG_HOST}
+PG_PORT=${PG_PORT}
+PG_NAME=${PG_NAME}
+PG_USER=${PG_USER}
+PG_PASS=${PG_PASS}
+ADMIN_USER=${ADMIN_USER}
+ADMIN_PASS=${ADMIN_PASS}
+ADMIN_MAIL=${ADMIN_MAIL}
+CADDY_ENABLE=${CADDY_ENABLE}
 CADDY_DOMAIN=${CADDY_DOMAIN}
+RUNNER_ENABLE=${RUNNER_ENABLE}
 EOF
-
     chmod 600 "$CONFIG_FILE"
 }
 
 load_config() {
-    if [ -f "$CONFIG_FILE" ]; then
-        # shellcheck source=/dev/null
-        source "$CONFIG_FILE"
-    fi
+    if [ -f "$CONFIG_FILE" ]; then source "$CONFIG_FILE"; fi
 }
 
-# ─── 状态显示 ───────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────
+# 状态面板 & 管理命令
+# ──────────────────────────────────────────────────────────────
+print_status() {
+    local label="$1" ok="$2"
+    printf "  %-15s %s\n" "$label" "$ok"
+}
 
-show_status() {
+show_summary() {
     echo ""
-    draw_box_top
-    draw_box_line "📊 Gitea 服务状态" "${C[YD]}"
-    draw_divider
-
-    # Gitea 状态
-    local gitea_status="未运行"
-    if systemctl is-active --quiet gitea 2>/dev/null; then
-        gitea_status="${C[G]}● 运行中${C[W]}"
-    else
-        gitea_status="${C[R]}○ 已停止${C[W]}"
-    fi
-    draw_box_line "Gitea:          ${gitea_status}"
-
-    # PostgreSQL 状态
-    local pg_status="未运行"
-    if systemctl is-active --quiet postgresql 2>/dev/null || \
-       systemctl is-active --quiet postgresql-* 2>/dev/null; then
-        pg_status="${C[G]}● 运行中${C[W]}"
-    else
-        pg_status="${C[R]}○ 已停止${C[W]}"
-    fi
-    draw_box_line "PostgreSQL:     ${pg_status}"
-
-    # Gitea 版本
-    local installed_ver="$(${GITEA_BIN} --version 2>/dev/null | head -1 || echo 'N/A')"
-    draw_box_line "Gitea 版本:     ${C[CD]}${installed_ver}${C[W]}"
-
-    # Actions Runner
-    local runner_status="未安装"
-    if [ -x /usr/local/bin/act_runner ]; then
-        runner_status="${C[G]}● 已安装${C[W]}"
-    fi
-    draw_box_line "Actions Runner: ${runner_status}"
-
-    # Caddy
-    local caddy_status="未配置"
-    if [ "$CADDY_ENABLED" = "true" ]; then
-        if systemctl is-active --quiet caddy 2>/dev/null; then
-            caddy_status="${C[G]}● 运行中${C[W]}"
-        else
-            caddy_status="${C[R]}○ 已停止${C[W]}"
-        fi
-    fi
-    draw_box_line "Caddy (HTTPS):  ${caddy_status}"
-
-    # 访问地址
-    draw_divider
-    if [ "$CADDY_ENABLED" = "true" ] && [ -n "$CADDY_DOMAIN" ]; then
-        draw_box_line "🌐 https://${CADDY_DOMAIN}" "${C[YD]}"
-    else
-        draw_box_line "🌐 http://${GITEA_DOMAIN}:${GITEA_HTTP_PORT}/" "${C[YD]}"
-    fi
-
-    draw_box_bottom
-}
-
-show_admin_info() {
+    _title "部署完成"
     echo ""
-    draw_box_top
-    draw_box_line "🔐 管理员凭据" "${C[YD]}"
-    draw_divider
-    draw_box_line "用户名:    ${C[WD]}${GITEA_ADMIN_USER}${C[W]}"
-    draw_box_line "密码:      ${C[WD]}${GITEA_ADMIN_PASSWORD}${C[W]}"
-    draw_box_line "邮箱:      ${C[W]}${GITEA_ADMIN_EMAIL}"
-    draw_divider
-    draw_box_line "${C[R]}⚠ 请立即登录修改密码!${C[W]}"
-    draw_box_line "配置存档:  ${CONFIG_FILE}"
-    draw_box_bottom
-}
 
-# ─── 更新功能 ───────────────────────────────────────────────────────────────────
+    # 服务状态
+    local gitea_ok="未运行";   systemctl is-active --quiet gitea 2>/dev/null      && gitea_ok="${C_GRN}● 运行中${C_RST}"
+    local pg_ok="未运行";      systemctl is-active --quiet postgresql 2>/dev/null && pg_ok="${C_GRN}● 运行中${C_RST}"
+    [ "$pg_ok" = "未运行" ] && { systemctl is-active --quiet postgresql-* 2>/dev/null && pg_ok="${C_GRN}● 运行中${C_RST}"; }
+    local caddy_ok="未配置"
+    [ "$CADDY_ENABLE" = "true" ] && { systemctl is-active --quiet caddy 2>/dev/null && caddy_ok="${C_GRN}● 运行中${C_RST}" || caddy_ok="${C_RED}○ 已停止${C_RST}"; }
 
-check_update() {
-    step_header "检查 Gitea 更新"
-
-    info "当前安装版本: v$(load_config 2>/dev/null; echo "${GITEA_VERSION:-unknown}")"
-
-    local latest
-    latest=$(curl -sSL https://api.github.com/repos/go-gitea/gitea/releases/latest 2>/dev/null \
-        | grep -oP '"tag_name":\s*"\K[^"]+' | sed 's/^v//')
-
-    if [ -z "$latest" ]; then
-        error "无法获取最新版本信息"
-        return 1
-    fi
-
-    local current
-    current=$("$GITEA_BIN" --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "0.0.0")
+    printf "  ${C_BLD}%-15s %-15s %-15s %-15s${C_RST}\n" "服务" "状态" "版本" "端口"
+    _hr
+    printf "  %-15s %b%-15s${C_RST} %-15s %-15s\n" \
+        "Gitea" "$gitea_ok" "v${GITEA_VERSION}" "${GITEA_LISTEN}"
+    printf "  %-15s %b%-15s${C_RST} %-15s %-15s\n" \
+        "PostgreSQL" "$pg_ok" "$(psql --version 2>/dev/null | awk '{print $NF}' || echo '?')" "${PG_PORT}"
+    printf "  %-15s %b%-15s${C_RST} %-15s %-15s\n" \
+        "Caddy" "$caddy_ok" "$(caddy version 2>/dev/null | head -1 || echo 'N/A')" "80/443"
 
     echo ""
-    print_table_header "项目" "版本"
-    print_table_row "当前版本" "v${current}"
-    print_table_row "最新版本" "v${latest}"
-
-    if [ "$current" = "$latest" ]; then
-        echo ""
-        ok "已是最新版本! 🎉"
-        return 0
+    if [ "$CADDY_ENABLE" = "true" ] && [ -n "$CADDY_DOMAIN" ]; then
+        printf "  ${C_BWT}访问地址:${C_RST}  ${C_BCY}https://%s${C_RST}\n" "$CADDY_DOMAIN"
+    else
+        printf "  ${C_BWT}访问地址:${C_RST}  ${C_BCY}http://%s:%s${C_RST}\n" \
+            "$(hostname -I 2>/dev/null | awk '{print $1}' || echo 'localhost')" "$GITEA_LISTEN"
     fi
 
-    # 版本比较
-    local newer
-    newer=$(printf '%s\n%s\n' "$current" "$latest" | sort -V | tail -1)
-    if [ "$newer" = "$latest" ] && [ "$current" != "$latest" ]; then
-        echo ""
-        echo -e "  ${C[YD]}┌─────────────────────────────────────────────────────────────────────┐${C[NC]}"
-        echo -e "  ${C[YD]}│  ${C[RD]}🎯 发现新版本! v${current} → v${latest}${C[NC]}"
-        echo -e "  ${C[YD]}│${C[NC]}  ${C[W]}运行 ${C[CD]}./gitea-manager.sh update${C[W]} 执行更新${C[NC]}"
-        echo -e "  ${C[YD]}└─────────────────────────────────────────────────────────────────────┘${C[NC]}"
-        return 2
-    fi
+    echo ""
+    printf "  ${C_BWT}管理员:${C_RST}  %-16s ${C_DIM}密码: %s${C_RST}\n" "$ADMIN_USER" "$ADMIN_PASS"
+    printf "  ${C_DIM}密码已保存至 ${CONFIG_FILE}${C_RST}\n"
+    echo ""
 }
 
-do_update() {
-    load_config 2>/dev/null
+cmd_status() {
+    load_config 2>/dev/null || true
+    show_summary
+}
 
-    echo -e "${C[BD]}"
-    echo "  ╔══════════════════════════════════════════╗"
-    echo "  ║       🔄 Gitea 自动更新程序              ║"
-    echo "  ╚══════════════════════════════════════════╝"
-    echo -e "${C[NC]}"
+cmd_config() {
+    load_config 2>/dev/null || true
+    _title "当前配置"
+    echo ""
+    print_status "Gitea 版本"    "v${GITEA_VERSION:-N/A}"
+    print_status "监听端口"      "${GITEA_LISTEN:-3000}"
+    print_status "数据库"        "${PG_USER:-?}@${PG_HOST:-?}:${PG_PORT:-?}/${PG_NAME:-?}"
+    print_status "Caddy 域名"    "${CADDY_DOMAIN:-未配置}"
+    print_status "管理员"        "${ADMIN_USER:-N/A}"
+    print_status "配置文件"      "${CONFIG_FILE}"
+    echo ""
+}
 
-    # 设置新版本
-    GITEA_VERSION="latest"
-    fetch_gitea_version
-
-    local old_version
-    old_version=$("$GITEA_BIN" --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "?")
-
-    if [ "$old_version" = "$GITEA_VERSION" ]; then
-        ok "已是最新版 v${GITEA_VERSION}，无需更新"
-        return 0
+cmd_check() {
+    load_config 2>/dev/null || true
+    _title "检查更新"
+    local current; current="$($GITEA_BIN --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "0")"
+    local latest; latest="$(curl -sSL https://api.github.com/repos/go-gitea/gitea/releases/latest 2>/dev/null \
+        | grep -oP '"tag_name":\s*"\K[^"]+' | sed 's/^v//')"
+    printf "  %-15s v%s\n" "当前版本:" "$current"
+    printf "  %-15s v%s\n" "最新版本:" "${latest:-?}"
+    if [ -n "$latest" ] && [ "$current" != "$latest" ]; then
+        printf "\n  ${C_BYL}发现新版本!${C_RST} 运行 ${C_BCY}$0 update${C_RST} 来升级\n"
+    else
+        printf "\n  ${C_GRN}已是最新版本${C_RST}\n"
     fi
+    echo ""
+}
 
-    info "更新: v${old_version} → v${GITEA_VERSION}"
+cmd_update() {
+    load_config 2>/dev/null || true
+    _title "更新 Gitea"
+    _info "当前: v$("$GITEA_BIN" --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "?")"
+    GITEA_VERSION="latest"; fetch_gitea_version
+    _info "最新: v${GITEA_VERSION}"
 
-    # 停止服务
-    info "停止 Gitea 服务..."
     systemctl stop gitea 2>/dev/null || true
+    cp "$GITEA_CONF" "${GITEA_CONF}.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+    _info "备份 → ${GITEA_CONF}.bak.*"
 
-    # 备份
-    info "备份配置文件..."
-    cp "$GITEA_CONFIG" "${GITEA_CONFIG}.bak.$(date +%Y%m%d%H%M%S)"
+    local url="https://dl.gitea.com/gitea/${GITEA_VERSION}/gitea-${GITEA_VERSION}-linux-${ARCH}"
+    curl -fSL# -o "${GITEA_BIN}.tmp" "$url" && chmod +x "${GITEA_BIN}.tmp" && mv "${GITEA_BIN}.tmp" "$GITEA_BIN"
 
-    # 下载新版本
-    download_gitea
-
-    # 更新版本号
     save_config
-
-    # 启动服务
-    info "启动 Gitea 服务..."
     systemctl start gitea
-
-    # 等待就绪
-    sleep 5
-    local new_ver
-    new_ver=$("$GITEA_BIN" --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "?")
-
+    _ok "更新完成 → v${GITEA_VERSION}"
     echo ""
-    echo -e "  ${C[G]}┌─────────────────────────────────────────────────────────────────────┐${C[NC]}"
-    echo -e "  ${C[G]}│                        ✅ 更新完成                                  │${C[NC]}"
-    echo -e "  ${C[G]}├─────────────────────────────────────────────────────────────────────┤${C[NC]}"
-    echo -e "  ${C[G]}│${C[NC]}  旧版本: v${old_version}"
-    echo -e "  ${C[G]}│${C[NC]}  新版本: v${new_ver}"
-    printf "  ${C[G]}│${C[NC]}  备份:   %s\n" "${GITEA_CONFIG}.bak.*"
-    echo -e "  ${C[G]}└─────────────────────────────────────────────────────────────────────┘${C[NC]}"
-
-    show_status
 }
 
-# ══════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════
 # 主安装流程
-# ══════════════════════════════════════════════════════════════════════════════════
-
-full_install() {
-    banner
-
-    # 检查 root
+# ═══════════════════════════════════════════════════════════════
+cmd_install() {
+    # 权限检查
     if [ "$(id -u)" -ne 0 ]; then
-        error "请以 root 权限运行此脚本!"
-        echo "  sudo bash $0 install"
+        _err "请以 root 运行: sudo $0 install"
         exit 1
     fi
 
-    echo ""
-    printf "  ${C[YD]}即将安装:${C[NC]}  Gitea  ·  Caddy  ·  PostgreSQL  ·  Docker  ·  Actions Runner\n"
-    echo ""
-
-    # 加载已有配置
-    load_config 2>/dev/null || true
-
-    # 检测
-    detect_os
-
-    # 检查是否已安装
+    # 已安装检查
     if [ -f "$GITEA_BIN" ]; then
-        warn "检测到 Gitea 已安装"
-        local cur_ver
-        cur_ver=$("$GITEA_BIN" --version 2>/dev/null | head -1 || echo "unknown")
-        info "当前版本: $cur_ver"
-        confirm=$(ask $'  \033[1;33m是否重新安装/覆盖? [y/N]: \033[0m' "n")
-        if [ "${confirm,,}" != "y" ] && [ "${confirm,,}" != "yes" ]; then
-            info "已取消安装"
-            show_status
-            exit 0
-        fi
+        load_config 2>/dev/null || true
+        _warn "Gitea 已安装 ($("$GITEA_BIN" --version 2>/dev/null | head -1 || echo "?"))"
+        local ans; ans="$(_ask "  ${C_WHT}重新安装?${C_RST} ${C_DIM}[y/N]${C_RST} " "n")"
+        [ "${ans,,}" != "y" ] && { _info "已取消"; exit 0; }
     fi
 
-    # 按顺序执行安装步骤
-    prompt_domain
-    install_dependencies
-    install_postgresql
-    configure_postgresql
-    install_caddy
-    fetch_gitea_version
-    setup_gitea_user
-    setup_directories
-    generate_gitea_config
-    download_gitea
-    create_systemd_service
-    start_services
-    configure_caddy
-    start_caddy
-    create_admin_user
-    setup_actions_runner
+    # Banner
+    clear 2>/dev/null || true
+    printf "${C_BLD}%*s${C_RST}\n" "$WIDTH" "" | tr ' ' '─'
+    printf "  ${C_BLD}Gitea Tools Manager${C_RST}  ${C_DIM}v%s${C_RST}\n" "$SCRIPT_VERSION"
+    printf "  ${C_BCY}Gitea · Caddy · PostgreSQL · Actions${C_RST}  ${C_DIM}—  一键部署${C_RST}\n"
+    printf "${C_BLD}%*s${C_RST}\n" "$WIDTH" "" | tr ' ' '─'
+    printf "\n  Gitea  ·  Caddy HTTPS  ·  PostgreSQL  ·  Docker  ·  Actions Runner\n\n"
 
+    TOTAL_STEPS=10
+
+    # ── 1. 系统环境 ──
+    detect_system              # [01/10]
+
+    # ── 2. 域名配置 (交互式) ──
+    prompt_domain              # [02/10]
+
+    # ── 3. 依赖 ──
+    install_deps               # [03/10]
+
+    # ── 4. PostgreSQL ──
+    install_postgresql         # [04/10]
+
+    # ── 5. Gitea 安装 ──
+    install_gitea              # [05/10]
+
+    # ── 6. Gitea 配置 ──
+    write_gitea_config         # [06/10]
+
+    # ── 7. Caddy 安装 ──
+    install_caddy              # [07/10]
+
+    # ── 8. 启动服务 ──
+    start_all_services         # [08/10]
+
+    # ── 9. 管理员 ──
+    create_admin               # [09/10]
+
+    # ── 10. Actions Runner ──
+    setup_actions_runner       # [10/10]
+
+    # ── 持久化 ──
     save_config
 
-    # ─── 完成 ──────────────────────────────────────────────────────
-    echo ""
-    printf "  ${C[GD]}%s${C[NC]}\n" "$(printf '%*s' 70 '' | tr ' ' '═')"
-    printf "  ${C[GD]}  ✓  安装全部完成!${C[NC]}\n"
-    printf "  ${C[GD]}%s${C[NC]}\n" "$(printf '%*s' 70 '' | tr ' ' '═')"
-
-    show_status
-    show_admin_info
-
-    echo ""
-    printf "  ${C[BD]}%s${C[NC]}\n" "$(printf '%*s' 70 '' | tr ' ' '─')"
-    printf "  ${C[W]}常用:${C[NC]}  systemctl status gitea │ journalctl -u gitea -f │ $0 check │ $0 update\n"
-    printf "  ${C[BD]}%s${C[NC]}\n" "$(printf '%*s' 70 '' | tr ' ' '─')"
-    echo ""
-    _log "INFO" "Installation completed successfully"
+    show_summary
+    _log INFO "install complete: gitea ${GITEA_VERSION}"
 }
 
-# ─── 后台更新守护 ───────────────────────────────────────────────────────────────
+cmd_uninstall() {
+    load_config 2>/dev/null || true
+    _title "卸载 Gitea Tools Manager"
 
-daemon_check() {
-    # 后台定时检查更新（配合 cron 使用）
-    local interval="${1:-86400}"  # 默认每天检查一次
+    local ans; ans="$(_ask "  ${C_BRD}确认卸载? 这会删除 Gitea、数据库和服务!${C_RST} 输入 DELETE 确认: " "")"
+    [ "$ans" != "DELETE" ] && { _info "已取消"; exit 0; }
 
-    banner
-    echo -e "  ${C[C]}📡 更新监控已启动 (间隔: ${interval}s)${C[NC]}"
-    echo ""
-
-    while true; do
-        local latest current
-        latest=$(curl -sSL https://api.github.com/repos/go-gitea/gitea/releases/latest 2>/dev/null \
-            | grep -oP '"tag_name":\s*"\K[^"]+' | sed 's/^v//')
-        current=$("$GITEA_BIN" --version 2>/dev/null | grep -oP '\d+\.\d+\.\d+' | head -1 || echo "0.0.0")
-
-        if [ -n "$latest" ] && [ "$current" != "$latest" ]; then
-            echo -e "  ${C[YD]}$(date '+%Y-%m-%d %H:%M:%S') | 发现更新: v${current} → v${latest}${C[NC]}"
-            _log "UPDATE" "New version available: v${current} → v${latest}"
-
-            # 可选：自动更新
-            # do_update
-        else
-            echo -e "  ${C[G]}$(date '+%Y-%m-%d %H:%M:%S') | 已是最新 v${current}${C[NC]}"
-        fi
-
-        sleep "$interval"
-    done
-}
-
-# ══════════════════════════════════════════════════════════════════════════════════
-# 命令路由
-# ══════════════════════════════════════════════════════════════════════════════════
-
-usage() {
-    echo ""
-    echo -e "${C[BD]}Gitea Tools Manager v${VERSION}${C[NC]}"
-    echo ""
-    echo -e "${C[YD]}用法:${C[NC]} $0 <命令> [选项]"
-    echo ""
-    echo -e "${C[WD]}命令:${C[NC]}"
-    echo -e "  ${C[CD]}install${C[NC]}    一键安装 Gitea + Caddy反代 + PostgreSQL + Actions Runner"
-    echo -e "  ${C[CD]}update${C[NC]}     更新 Gitea 到最新版本"
-    echo -e "  ${C[CD]}check${C[NC]}      检查是否有新版本"
-    echo -e "  ${C[CD]}status${C[NC]}     查看服务运行状态"
-    echo -e "  ${C[CD]}config${C[NC]}     显示当前配置信息"
-    echo -e "  ${C[CD]}watch${C[NC]}      后台监控更新 (可选参数: 检查间隔秒数)"
-    echo -e "  ${C[CD]}uninstall${C[NC]}  卸载 Gitea 及相关服务"
-    echo ""
-    echo -e "${C[WD]}示例:${C[NC]}"
-    echo -e "  sudo $0 install              # 完整安装"
-    echo -e "  $0 check                     # 检查更新"
-    echo -e "  $0 watch 43200               # 每12小时检查一次更新"
-    echo ""
-}
-
-# 卸载
-do_uninstall() {
-    echo -e "${C[RD]}"
-    echo "  ╔══════════════════════════════════════════╗"
-    echo "  ║        ⚠  卸载 Gitea 所有组件           ║"
-    echo "  ╚══════════════════════════════════════════╝"
-    echo -e "${C[NC]}"
-    echo ""
-    echo -e "  ${C[R]}此操作将删除 Gitea、配置文件和数据库!${C[NC]}"
-    confirm=$(ask "  请输入 'DELETE' 确认卸载: " "")
-    if [ "$confirm" != "DELETE" ]; then
-        info "已取消"
-        exit 0
-    fi
-
-    systemctl stop gitea 2>/dev/null || true
-    systemctl stop gitea-actions-runner 2>/dev/null || true
-    systemctl disable gitea 2>/dev/null || true
-    systemctl disable gitea-actions-runner 2>/dev/null || true
+    systemctl stop gitea gitea-actions-runner caddy 2>/dev/null || true
+    systemctl disable gitea gitea-actions-runner caddy 2>/dev/null || true
     rm -f /etc/systemd/system/gitea.service
     rm -f /etc/systemd/system/gitea-actions-runner.service
     systemctl daemon-reload
 
-    rm -f "$GITEA_BIN"
-    rm -f /usr/local/bin/act_runner
-    rm -rf "$GITEA_HOME"
-    rm -rf /etc/gitea
-    rm -f "$CONFIG_FILE"
+    rm -f "$GITEA_BIN" /usr/local/bin/act_runner
+    rm -rf "$GITEA_HOME" /etc/gitea /etc/caddy/Caddyfile
+    rm -f "$CONFIG_FILE" "$LOG_FILE"
 
-    # 清理 Caddy
-    systemctl stop caddy 2>/dev/null || true
-    systemctl disable caddy 2>/dev/null || true
-    rm -f /etc/systemd/system/caddy.service
-    rm -f /etc/caddy/Caddyfile
-    systemctl daemon-reload
-
-    # 删除数据库
-    su - postgres -c "psql -c 'DROP DATABASE IF EXISTS ${GITEA_DB_NAME};'" 2>/dev/null || true
-    su - postgres -c "psql -c 'DROP ROLE IF EXISTS ${GITEA_DB_USER};'" 2>/dev/null || true
-
+    su - postgres -c "psql -c 'DROP DATABASE IF EXISTS ${PG_NAME};'" 2>/dev/null || true
+    su - postgres -c "psql -c 'DROP ROLE IF EXISTS ${PG_USER};'" 2>/dev/null || true
     userdel -r "$GITEA_USER" 2>/dev/null || true
 
-    ok "卸载完成"
+    _ok "卸载完成"
 }
 
-show_config() {
-    load_config 2>/dev/null || true
-    echo ""
-    draw_box_top
-    draw_box_line "📋 当前配置" "${C[YD]}"
-    draw_box_line "$(printf '%*s' 67 | tr ' ' '-')"
-    draw_box_line "Gitea 版本:    ${GITEA_VERSION:-N/A}"
-    draw_box_line "域名:          ${GITEA_DOMAIN:-N/A}"
-    draw_box_line "HTTP 端口:     ${GITEA_HTTP_PORT:-3000}"
-    draw_box_line "数据库类型:    ${GITEA_DB_TYPE:-postgres}"
-    draw_box_line "数据库主机:    ${GITEA_DB_HOST:-127.0.0.1}"
-    draw_box_line "数据库名称:    ${GITEA_DB_NAME:-gitea}"
-    draw_box_line "数据库用户:    ${GITEA_DB_USER:-gitea}"
-    draw_box_line "管理员:        ${GITEA_ADMIN_USER:-N/A}"
-    draw_box_line "Actions Runner: ${ACTIONS_RUNNER_ENABLED:-true}"
-    draw_box_line "Caddy 反代:    ${CADDY_ENABLED:-false}"
-    draw_box_line "反向代理域名:  ${CADDY_DOMAIN:-未配置}"
-    draw_box_line "配置文件:      ${CONFIG_FILE}"
-    draw_box_bottom
-    echo ""
+# ═══════════════════════════════════════════════════════════════
+# 入口
+# ═══════════════════════════════════════════════════════════════
+usage() {
+    cat << EOF
+
+  ${C_BLD}Gitea Tools Manager${C_RST}  ${C_DIM}v${SCRIPT_VERSION}${C_RST}
+
+  用法:  $0 <命令>
+
+  命令:
+    install     ${C_DIM}一键部署 Gitea + Caddy + PostgreSQL + Actions Runner${C_RST}
+    update      ${C_DIM}更新 Gitea 到最新版本${C_RST}
+    check       ${C_DIM}检查是否有新版本${C_RST}
+    status      ${C_DIM}查看服务运行状态${C_RST}
+    config      ${C_DIM}显示当前配置${C_RST}
+    uninstall   ${C_DIM}完全卸载${C_RST}
+
+  快速开始:
+    ${C_BCY}curl -fsSL https://raw.githubusercontent.com/MomoFlora/Gitea-Tools-Manager/refs/heads/master/gitea-manager.sh | sudo bash -s install${C_RST}
+
+EOF
 }
 
-# ─── 主入口 ─────────────────────────────────────────────────────────────────────
-
-main() {
-    case "${1:-}" in
-        install)
-            full_install
-            ;;
-        update)
-            do_update
-            ;;
-        check)
-            load_config 2>/dev/null || true
-            check_update
-            ;;
-        status)
-            load_config 2>/dev/null || true
-            banner
-            show_status
-            ;;
-        config)
-            banner
-            show_config
-            ;;
-        watch)
-            daemon_check "${2:-86400}"
-            ;;
-        uninstall)
-            load_config 2>/dev/null || true
-            do_uninstall
-            ;;
-        -h|--help|help|"")
-            usage
-            ;;
-        *)
-            echo -e "${C[R]}未知命令: $1${C[NC]}"
-            usage
-            exit 1
-            ;;
-    esac
-}
-
-main "$@"
+case "${1:-}" in
+    install)    cmd_install ;;
+    update)     cmd_update ;;
+    check)      cmd_check ;;
+    status)     cmd_status ;;
+    config)     cmd_config ;;
+    uninstall)  cmd_uninstall ;;
+    -h|--help|help|"") usage ;;
+    *)          echo -e "${C_RED}未知命令: $1${C_RST}"; usage; exit 1 ;;
+esac
