@@ -722,7 +722,7 @@ INSTANCE="http://localhost:${GT_PORT}"
 echo "Gitea 地址: \$INSTANCE"
 
 # 尝试自动获取 token
-TOKEN=\$(su -s /bin/bash ${GT_USR} -c "GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} --config ${GT_CFG} actions generate-runner-token 2>/dev/null" 2>/dev/null || true)
+TOKEN=\$(GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} --config ${GT_CFG} --work-path ${GT_HOME} actions generate-runner-token 2>/dev/null | tail -1 | tr -d '[:space:]')
 if [ -n "\$TOKEN" ]; then
     echo "Token: \$TOKEN"
 else
@@ -742,22 +742,29 @@ exec /usr/local/bin/gitea-runner register --no-interactive \
 REGSCRIPT
     chmod +x "${GT_HOME}/register-runner.sh"
 
-    # 尝试自动注册
+    # 尝试自动获取 token 并注册
     LOG_OUT "注册 Actions Runner ..."
-    local token; token="$(su -s /bin/bash "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} --config ${GT_CFG} actions generate-runner-token" 2>&1 | tail -1 | tr -d '[:space:]')" || true
-    if [ -n "$token" ] && [ ${#token} -gt 8 ]; then
-        if su -s /bin/bash "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} /usr/local/bin/gitea-runner register \
+
+    # gitea CLI 用 TCP 连数据库，root 也能执行
+    local token; token="$(GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} --config ${GT_CFG} --work-path ${GT_HOME} actions generate-runner-token 2>/dev/null | tail -1 | tr -d '[:space:]')" || true
+
+    if [ -n "$token" ] && [ ${#token} -ge 8 ]; then
+        local reg_out; reg_out="$(GITEA_WORK_DIR=${GT_HOME} /usr/local/bin/gitea-runner register \
             --no-interactive \
             --instance http://localhost:${GT_PORT} \
-            --token '${token}' \
-            --name 'runner-$(hostname)' \
-            --labels 'ubuntu-latest:docker://node:20-bullseye,ubuntu-22.04:docker://catthehacker/ubuntu:act-22.04'" 2>/dev/null; then
+            --token "${token}" \
+            --name "runner-$(hostname)" \
+            --labels "ubuntu-latest:docker://node:20-bullseye,ubuntu-22.04:docker://catthehacker/ubuntu:act-22.04" 2>&1)" || true
+
+        if echo "$reg_out" | grep -qi "success\|registered\|ok"; then
             LOG_OK "Runner 注册成功"
         else
-            LOG_WARN "Runner 注册失败，请手动注册: ${GT_HOME}/register-runner.sh"
+            LOG_WARN "Runner 注册失败: $(echo "$reg_out" | tail -1)"
+            LOG_OUT "请稍后手动注册: ${GT_HOME}/register-runner.sh"
         fi
     else
-        LOG_WARN "无法自动获取 Token，请手动注册: ${GT_HOME}/register-runner.sh"
+        LOG_WARN "无法获取 Token (gitea CLI 返回空)，请手动注册"
+        LOG_OUT "手动注册脚本: ${GT_HOME}/register-runner.sh"
     fi
 
     chown -R "${GT_USR}:${GT_USR}" "${GT_HOME}/.runner" 2>/dev/null || true
