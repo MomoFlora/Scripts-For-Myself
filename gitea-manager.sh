@@ -709,8 +709,8 @@ setup_runner() {
         LOG_WARN "gitea-runner 下载失败"; return 0
     fi
 
-    # 创建 .runner 目录
-    mkdir -p "${GT_HOME}/.runner"
+    # 清理可能存在的旧目录冲突 (.runner 既是文件也是目录会出问题)
+    rm -rf "${GT_HOME}/.runner" 2>/dev/null || true
 
     # 创建注册脚本 (手动备用)
     cat > "${GT_HOME}/register-runner.sh" << REGSCRIPT
@@ -735,6 +735,7 @@ fi
 [ -z "\$TOKEN" ] && { echo "Token 不能为空"; exit 1; }
 echo ""
 echo "注册中..."
+cd ${GT_HOME}
 exec /usr/local/bin/gitea-runner register --no-interactive \
     --instance "\$INSTANCE" --token "\$TOKEN" \
     --name "runner-\$(hostname)" \
@@ -749,33 +750,44 @@ REGSCRIPT
     local token; token="$(GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} --config ${GT_CFG} --work-path ${GT_HOME} actions generate-runner-token 2>/dev/null | tail -1 | tr -d '[:space:]')" || true
 
     if [ -n "$token" ] && [ ${#token} -ge 8 ]; then
+        # 必须在 .runner 目录内执行 register，否则 .runner 文件会写到当前目录
+        cd "${GT_HOME}"
         local reg_out; reg_out="$(GITEA_WORK_DIR=${GT_HOME} /usr/local/bin/gitea-runner register \
             --no-interactive \
             --instance http://localhost:${GT_PORT} \
             --token "${token}" \
             --name "runner-$(hostname)" \
             --labels "ubuntu-latest:docker://node:20-bullseye,ubuntu-22.04:docker://catthehacker/ubuntu:act-22.04" 2>&1)" || true
+        cd - >/dev/null
 
-        if echo "$reg_out" | grep -qi "success\|registered\|ok"; then
+        if echo "$reg_out" | grep -qi "success\|registered\|ok\|INFO.*register"; then
             LOG_OK "Runner 注册成功"
+            # 注册后立即启动守护进程
+            systemctl start gitea-runner 2>/dev/null || true
+            sleep 1
+            if systemctl is-active --quiet gitea-runner 2>/dev/null; then
+                LOG_OK "Runner 守护进程已启动"
+            else
+                LOG_WARN "Runner 守护进程启动失败: journalctl -u gitea-runner -n 5"
+            fi
         else
             LOG_WARN "Runner 注册失败: $(echo "$reg_out" | tail -1)"
             LOG_OUT "请稍后手动注册: ${GT_HOME}/register-runner.sh"
         fi
     else
-        LOG_WARN "无法获取 Token (gitea CLI 返回空)，请手动注册"
-        LOG_OUT "手动注册脚本: ${GT_HOME}/register-runner.sh"
+        LOG_OUT "Token: ${token:-空}"
+        LOG_WARN "无法获取 Token，请手动注册: ${GT_HOME}/register-runner.sh"
     fi
 
-    chown -R "${GT_USR}:${GT_USR}" "${GT_HOME}/.runner" 2>/dev/null || true
+    chown "${GT_USR}:${GT_USR}" "${GT_HOME}/.runner" 2>/dev/null || true
 
-    # 创建 systemd 服务 (注册后运行)
+    # 创建 systemd 服务
     cat > /etc/systemd/system/gitea-runner.service << RUNSVC
 [Unit]
 Description=Gitea Actions Runner
 After=gitea.service docker.service
 Wants=gitea.service docker.service
-ConditionPathExists=${GT_HOME}/.runner/.runner
+ConditionPathExists=${GT_HOME}/.runner
 
 [Service]
 Type=simple
@@ -792,7 +804,7 @@ WantedBy=multi-user.target
 RUNSVC
     systemctl daemon-reload
     systemctl enable gitea-runner 2>/dev/null || true
-    LOG_OUT "Runner 服务已创建 (注册后自动启动)"
+    LOG_OUT "Runner systemd 服务已创建"
 }
 
 #===============================================================================
