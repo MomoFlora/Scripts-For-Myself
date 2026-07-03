@@ -10,7 +10,7 @@
 ## 快速开始
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MomoFlora/Gitea-Tools-Manager/refs/heads/master/gitea-manager.sh | sudo bash -s install
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/MomoFlora/Gitea-Tools-Manager/refs/heads/master/install.sh)"
 ```
 
 安装时输入你的域名（如 `git.example.com`），Caddy 自动申请 Let's Encrypt SSL 证书实现 HTTPS。留空则跳过。
