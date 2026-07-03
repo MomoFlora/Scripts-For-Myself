@@ -305,10 +305,25 @@ install_caddy() {
     ui_step "Edge Routing (Caddy)"
 
     if ! command -v caddy &>/dev/null; then
-        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable.gpg >/dev/null 2>&1
+        # 修复 1：强制清理旧 Key，并添加 --yes 防止 gpg 交互式卡死
+        rm -f /usr/share/keyrings/caddy-stable.gpg
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable.gpg || {
+            ui_err "Failed to import Caddy GPG key."
+            exit 1
+        }
+        
         echo "deb [signed-by=/usr/share/keyrings/caddy-stable.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" > /etc/apt/sources.list.d/caddy.list
-        apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq -o Dpkg::Use-Pty=0 caddy >/dev/null 2>&1
+        
+        # 修复 2：剥离静默错误，允许 update 遇到非致命警告时继续运行 (|| true)
+        apt-get update -qq || true 
+        apt-get install -y -qq -o Dpkg::Use-Pty=0 caddy || {
+            ui_err "APT failed to install Caddy. Please run 'apt update' manually to check for broken repositories."
+            exit 1
+        }
     fi
+
+    # 修复 3：确保配置目录存在，防止由于环境异常导致写入 Caddyfile 失败
+    mkdir -p /etc/caddy
 
     cat > /etc/caddy/Caddyfile << CADDYFILE
 ${CD_DOMAIN} {
@@ -317,7 +332,14 @@ ${CD_DOMAIN} {
     tls ${ADM_MAIL}
 }
 CADDYFILE
-    systemctl restart caddy >/dev/null 2>&1
+    
+    # 修复 4：如果服务启动失败，打印出前 15 行错误日志而不是直接退出
+    systemctl restart caddy >/dev/null 2>&1 || {
+        ui_err "Caddy service failed to start. Journal logs:"
+        journalctl -u caddy -n 15 --no-pager
+        exit 1
+    }
+    
     ui_ok "Caddy proxy linked to ${CD_DOMAIN}"
 }
 
