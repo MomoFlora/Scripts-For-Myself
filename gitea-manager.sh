@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #===============================================================================
 #  GITEA INFRASTRUCTURE MANAGER
-#  Version: 2.1.0
+#  Version: 2.1.1 (Stable Fix)
 #  Component: Gitea + Caddy + PostgreSQL + Actions Runner
 #===============================================================================
 set -euo pipefail
@@ -22,7 +22,7 @@ ui_banner() {
     clear
     printf "\n"
     printf "${C_CYN}${C_BLD}  G I T E A   I N F R A S T R U C T U R E${C_RST}\n"
-    printf "${C_DIM}  Automated Deployment & CI/CD Engine v2.1.0${C_RST}\n"
+    printf "${C_DIM}  Automated Deployment & CI/CD Engine v2.1.1${C_RST}\n"
     printf "${C_DIM}  ============================================================${C_RST}\n\n"
 }
 
@@ -43,7 +43,6 @@ ask() {
 #  GLOBAL VARIABLES
 #===============================================================================
 readonly CURDIR="$(cd "$(dirname "$0")" && pwd)"
-readonly SAVEFILE="${CURDIR}/gitea-manager.conf"
 
 GT_VER="${GT_VER:-latest}"
 GT_USR="${GT_USR:-gitea}"
@@ -61,14 +60,14 @@ PG_PWD="${PG_PWD:-}"
 CD_ENABLE="${CD_ENABLE:-false}"
 CD_DOMAIN="${CD_DOMAIN:-}"
 RN_ENABLE="${RN_ENABLE:-true}"
-ADM_USR="${ADM_USR:-gitea_admin}"
-ADM_PWD="${ADM_PWD:-}"
-ADM_MAIL="${ADM_MAIL:-}"
+ADM_USR=""
+ADM_PWD=""
+ADM_MAIL=""
 
 OS_ID=""; ARCH=""; PKG=""
 
 #===============================================================================
-#  SYSTEM DETECTION
+#  SYSTEM DETECTION & PREFERENCES (Prompted Upfront)
 #===============================================================================
 detect_system() {
     ui_step "Environment Detection"
@@ -89,8 +88,10 @@ detect_system() {
     ui_ok "OS: ${OS_ID} | ARCH: ${ARCH} | PKG: ${PKG}"
 }
 
-configure_domain() {
-    ui_step "Network & Edge Routing"
+configure_prefs() {
+    ui_step "Configuration & Preferences"
+    
+    # 1. 域名配置
     local dm
     dm="$(ask "Domain Name (Leave empty for IP:Port access): ${C_CYN}" "")"
     printf "${C_RST}"
@@ -98,12 +99,36 @@ configure_domain() {
     if [[ -n "$dm" && "$dm" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
         CD_ENABLE="true"
         CD_DOMAIN="$dm"
-        ADM_MAIL="${ADM_MAIL:-admin@${dm}}"
+        ADM_MAIL="admin@${dm}"
         ui_ok "Edge routing enabled: https://${CD_DOMAIN}"
     else
         CD_ENABLE="false"
+        ADM_MAIL="admin@localhost"
         ui_info "Running in IP mode (Port: ${GT_PORT})"
     fi
+
+    echo ""
+    # 2. Gitea 管理员配置 (前置获取)
+    ADM_USR="$(ask "Set Gitea Admin Username [gitea_admin]: ${C_CYN}" "gitea_admin")"
+    printf "${C_RST}"
+
+    while true; do
+        local temp_pwd
+        temp_pwd="$(ask "Set Gitea Admin Password (min 8 chars, empty to auto-gen): ${C_CYN}" "")"
+        printf "${C_RST}"
+        if [ -z "$temp_pwd" ]; then
+            ADM_PWD="$(openssl rand -base64 12 | tr -d '/+=')"
+            ui_info "Auto-generated password: ${ADM_PWD}"
+            break
+        elif [ "${#temp_pwd}" -lt 8 ]; then
+            ui_warn "Password must be at least 8 characters."
+        else
+            ADM_PWD="$temp_pwd"
+            break
+        fi
+    done
+    
+    ui_ok "Preferences saved. Beginning unattended installation..."
 }
 
 #===============================================================================
@@ -116,8 +141,8 @@ install_dependencies() {
     case "$PKG" in
         apt)
             export DEBIAN_FRONTEND=noninteractive
-            apt-get update -qq 2>/dev/null || true
-            apt-get install -y -qq -o Dpkg::Use-Pty=0 $pkgs 2>/dev/null
+            apt-get update -qq >/dev/null 2>&1 || true
+            apt-get install -y -qq -o Dpkg::Use-Pty=0 $pkgs >/dev/null 2>&1
             if ! command -v docker &>/dev/null; then
                 ui_info "Installing Docker Engine..."
                 curl -fsSL https://get.docker.com | bash -s >/dev/null 2>&1
@@ -228,8 +253,8 @@ generate_gitea_config() {
         domain="$(curl -s --max-time 2 ifconfig.me 2>/dev/null || hostname -I | awk '{print $1}')"
         root_url="http://${domain}:${GT_PORT}/"
     fi
-    ADM_MAIL="${ADM_MAIL:-admin@${domain}}"
 
+    # [FIX]: Added SSH_PORT and SSH_LISTEN_PORT to prevent binding to port 22
     cat > "$GT_CFG" << EOF
 APP_NAME   = Gitea Infrastructure
 RUN_USER   = ${GT_USR}
@@ -246,6 +271,8 @@ ROOT_URL         = ${root_url}
 HTTP_ADDR        = 0.0.0.0
 HTTP_PORT        = ${GT_PORT}
 START_SSH_SERVER = true
+SSH_PORT         = 2222
+SSH_LISTEN_PORT  = 2222
 
 [database]
 DB_TYPE  = postgres
@@ -306,19 +333,17 @@ start_services() {
 }
 
 #===============================================================================
-#  ADMIN & RUNNER (Critical Fix Applied)
+#  ADMIN & RUNNER
 #===============================================================================
 create_admin() {
     ui_step "Admin Provisioning"
-    ADM_USR="$(ask "Admin Username [gitea_admin]: ${C_CYN}" "gitea_admin")"
-    printf "${C_RST}"
-    ADM_PWD="$(ask "Admin Password [auto-gen]:    ${C_CYN}" "$(openssl rand -base64 12 | tr -d '/+=')")"
-    printf "${C_RST}"
-
     su - "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} admin user create \
         --admin --username '${ADM_USR}' --password '${ADM_PWD}' \
-        --email '${ADM_MAIL}' --config '${GT_CFG}' --must-change-password=false" >/dev/null 2>&1 || true
-    ui_ok "Admin account injected"
+        --email '${ADM_MAIL}' --config '${GT_CFG}' --must-change-password=false" >/dev/null 2>&1 || {
+        ui_warn "Admin account already exists or creation skipped."
+        return 0
+    }
+    ui_ok "Admin account '${ADM_USR}' injected"
 }
 
 setup_runner() {
@@ -337,16 +362,11 @@ setup_runner() {
     chmod +x /usr/local/bin/gitea-runner
     ui_ok "Runner binary (v${rv}) installed"
 
-    # [FIX] Execute strictly as gitea user to prevent .runner file permission conflicts
-    # [FIX] Clean up existing config if present
     su -s /bin/bash "$GT_USR" -c "rm -f ${GT_HOME}/.runner"
-
-    # [FIX] Generate token securely through the CLI environment
     local token
     token="$(su -s /bin/bash "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} --config ${GT_CFG} actions generate-runner-token" | tail -1 | tr -d '[:space:]')"
 
     if [ -n "$token" ] && [ ${#token} -ge 30 ]; then
-        # [FIX] Register under $GT_USR context
         local reg_out
         reg_out="$(su -s /bin/bash "$GT_USR" -c "cd ${GT_HOME} && /usr/local/bin/gitea-runner register \
             --no-interactive \
@@ -365,7 +385,6 @@ setup_runner() {
         ui_err "Failed to extract valid token from Gitea API"
     fi
 
-    # [FIX] Ensure Docker dependency via systemd Requires
     cat > /etc/systemd/system/gitea-runner.service << RUNSVC
 [Unit]
 Description=Gitea Actions Runner
@@ -419,7 +438,7 @@ fi
 
 ui_banner
 detect_system
-configure_domain
+configure_prefs
 install_dependencies
 install_postgresql
 install_gitea
