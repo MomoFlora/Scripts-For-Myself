@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #===============================================================================
 #  GITEA INFRASTRUCTURE MANAGER
-#  Version: 2.1.1 (Stable Fix)
+#  Version: 2.1.2 (Syntax Hotfix)
 #  Component: Gitea + Caddy + PostgreSQL + Actions Runner
 #===============================================================================
 set -euo pipefail
@@ -22,7 +22,7 @@ ui_banner() {
     clear
     printf "\n"
     printf "${C_CYN}${C_BLD}  G I T E A   I N F R A S T R U C T U R E${C_RST}\n"
-    printf "${C_DIM}  Automated Deployment & CI/CD Engine v2.1.1${C_RST}\n"
+    printf "${C_DIM}  Automated Deployment & CI/CD Engine v2.1.2${C_RST}\n"
     printf "${C_DIM}  ============================================================${C_RST}\n\n"
 }
 
@@ -30,7 +30,7 @@ ui_step()  { printf "\n${C_BLD}${C_CYN}✦ %s${C_RST}\n" "$*"; }
 ui_info()  { printf "  ${C_DIM}│${C_RST}  %s\n" "$*"; }
 ui_ok()    { printf "  ${C_DIM}│${C_RST}  ${C_GRN}✔${C_RST} %s\n" "$*"; }
 ui_err()   { printf "  ${C_DIM}│${C_RST}  ${C_RED}✖${C_RST} %s\n" "$*" >&2; }
-ui_warn()  { printf "  ${C_DIM}│${C_RST}  ${C_YEL}⚠${C_RST} %s\n" "$*"; }
+ui_warn()  { printf "  ${C_DIM}│${C_RST}  ${C_YEL}⚠${C_RST} %s\n" "$*;"; }
 
 ask() {
     local prompt="$1" default="$2" val
@@ -108,7 +108,7 @@ configure_prefs() {
     fi
 
     echo ""
-    # 2. Gitea 管理员配置 (前置获取)
+    # 2. Gitea 管理员配置
     ADM_USR="$(ask "Set Gitea Admin Username [gitea_admin]: ${C_CYN}" "gitea_admin")"
     printf "${C_RST}"
 
@@ -254,7 +254,6 @@ generate_gitea_config() {
         root_url="http://${domain}:${GT_PORT}/"
     fi
 
-    # [FIX]: Added SSH_PORT and SSH_LISTEN_PORT to prevent binding to port 22
     cat > "$GT_CFG" << EOF
 APP_NAME   = Gitea Infrastructure
 RUN_USER   = ${GT_USR}
@@ -300,12 +299,14 @@ EOF
     ui_ok "Config synchronized (app.ini)"
 }
 
+#===============================================================================
+#  EDGE ROUTING (CADDY) WITH CORRECT SYNTAX
+#===============================================================================
 install_caddy() {
     if [ "$CD_ENABLE" != "true" ]; then return 0; fi
     ui_step "Edge Routing (Caddy)"
 
     if ! command -v caddy &>/dev/null; then
-        # 修复 1：强制清理旧 Key，并添加 --yes 防止 gpg 交互式卡死
         rm -f /usr/share/keyrings/caddy-stable.gpg
         curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable.gpg || {
             ui_err "Failed to import Caddy GPG key."
@@ -314,26 +315,26 @@ install_caddy() {
         
         echo "deb [signed-by=/usr/share/keyrings/caddy-stable.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" > /etc/apt/sources.list.d/caddy.list
         
-        # 修复 2：剥离静默错误，允许 update 遇到非致命警告时继续运行 (|| true)
         apt-get update -qq || true 
         apt-get install -y -qq -o Dpkg::Use-Pty=0 caddy || {
-            ui_err "APT failed to install Caddy. Please run 'apt update' manually to check for broken repositories."
+            ui_err "APT failed to install Caddy. Please check broken repositories."
             exit 1
         }
     fi
 
-    # 修复 3：确保配置目录存在，防止由于环境异常导致写入 Caddyfile 失败
     mkdir -p /etc/caddy
 
+    # [FIXED]: Multi-line block layout for Caddy's strict parser
     cat > /etc/caddy/Caddyfile << CADDYFILE
 ${CD_DOMAIN} {
     reverse_proxy localhost:${GT_PORT}
-    request_body { max_size 500MB }
+    request_body {
+        max_size 500MB
+    }
     tls ${ADM_MAIL}
 }
 CADDYFILE
     
-    # 修复 4：如果服务启动失败，打印出前 15 行错误日志而不是直接退出
     systemctl restart caddy >/dev/null 2>&1 || {
         ui_err "Caddy service failed to start. Journal logs:"
         journalctl -u caddy -n 15 --no-pager
