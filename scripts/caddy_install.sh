@@ -138,15 +138,15 @@ install_caddy_pkg() {
     fi
 
     ui_info "Refreshing package index..."
-    if apt-get update -qq 2>&1; then
+    if apt-get update -qq >/dev/null 2>&1; then
         ui_ok "Package index updated"
     else
         ui_err "apt-get update failed — check your APT sources."
         exit 1
     fi
 
-    ui_info "Installing caddy..."
-    if apt-get install -y caddy 2>&1; then
+    ui_info "Installing caddy (this may take a moment)..."
+    if apt-get install -y -qq -o Dpkg::Use-Pty=0 caddy >/dev/null 2>&1; then
         ui_ok "Caddy installed successfully"
     else
         ui_err "apt-get install caddy failed."
