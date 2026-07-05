@@ -6,43 +6,43 @@
   <img src="https://img.shields.io/badge/shell-bash-4EAA25.svg?logo=gnubash&logoColor=white" alt="Shell">
 </p>
 
-<h3 align="center">个人自用 · 一键部署脚本集</h3>
+<h3 align="center">Personal Collection · One-Click Deploy Scripts</h3>
 
 <p align="center">
-  <a href="#-caddy">Caddy 安装器</a> ·
-  <a href="#-gitea">Gitea 部署器</a> ·
-  <a href="#-命令速查">命令速查</a> ·
-  <a href="#-文件结构">文件结构</a> ·
-  <a href="README_EN.md">English</a>
+  <a href="#-caddy">Caddy Installer</a> ·
+  <a href="#-gitea">Gitea Deployer</a> ·
+  <a href="#-quick-reference">Quick Reference</a> ·
+  <a href="#-file-structure">File Structure</a> ·
+  <a href="README.md">中文</a>
 </p>
 
 ---
 
-## 🚀 Caddy — EasyCaddy 版安装器
+## 🚀 Caddy — EasyCaddy Installer
 
-> 从 [EasyCaddy](https://github.com/MomoFlora/EasyCaddy) 定制源通过 APT 安装 Caddy Web Server。
+> Install Caddy Web Server via APT from the [EasyCaddy](https://github.com/MomoFlora/EasyCaddy) custom repository.
 
-### 一键安装
+### One-Liner
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/MomoFlora/Scripts-For-Myself/refs/heads/master/scripts/caddy_install.sh)"
 ```
 
-或本地执行：
+Or run locally:
 
 ```bash
 sudo bash scripts/caddy_install.sh
 ```
 
-### 安装流程 (3 步)
+### Installation Steps (3 stages)
 
 ```
-[1/3] GPG 密钥环    → /usr/share/keyrings/caddy-archive-keyring.gpg
-[2/3] APT 仓库源    → /etc/apt/sources.list.d/caddy.list
-[3/3] 安装 Caddy    → apt update && apt install caddy
+[1/3] GPG Keyring    → /usr/share/keyrings/caddy-archive-keyring.gpg
+[2/3] APT Source     → /etc/apt/sources.list.d/caddy.list
+[3/3] Install Caddy  → apt update && apt install caddy
 ```
 
-### 终端预览
+### Terminal Preview
 
 ```
   ═══════════════════════════════════════════════════════
@@ -89,98 +89,98 @@ sudo bash scripts/caddy_install.sh
 
 ---
 
-## 🏗 Gitea — 基础设施一键部署
+## 🏗 Gitea — Full-Stack Infrastructure
 
-> Gitea + Caddy + PostgreSQL + Actions Runner 全栈部署。
+> Deploy Gitea + Caddy + PostgreSQL + Actions Runner in one shot.
 
-### 一键安装
+### One-Liner
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/MomoFlora/Scripts-For-Myself/refs/heads/master/scripts/gitea_install.sh)"
 ```
 
-安装时输入域名（如 `git.example.com`），Caddy 自动申请 Let's Encrypt SSL 证书。留空则使用 IP:Port 模式。
+Enter your domain (e.g. `git.example.com`) when prompted — Caddy auto-provisions Let's Encrypt SSL. Leave blank for IP:Port mode.
 
-### 安装流程 (10 步)
+### Installation Flow (10 steps)
 
 ```
-[01/10] 检测系统环境        → OS / 架构
-[02/10] 域名配置            → 交互式输入 / 跳过
-[03/10] 安装系统依赖        → curl git docker ...
-[04/10] 安装 PostgreSQL     → 数据库 + 用户 + scram-sha-256
-[05/10] 安装 Gitea          → 下载二进制 + 用户 + systemd
-[06/10] 生成 Gitea 配置     → app.ini (PostgreSQL 后端)
-[07/10] 安装 Caddy          → 反代 + 自动 HTTPS
-[08/10] 启动全部服务        → PostgreSQL → Gitea → Caddy
-[09/10] 创建管理员账户      → 自动生成密码
-[10/10] 配置 Actions Runner → act_runner + Docker
+[01/10] Environment Detection   → OS / Arch
+[02/10] Domain Configuration    → Interactive input / skip
+[03/10] System Dependencies     → curl git docker ...
+[04/10] PostgreSQL Setup        → Database + user + scram-sha-256
+[05/10] Gitea Binary            → Download + user + systemd
+[06/10] Gitea Config            → app.ini (PostgreSQL backend)
+[07/10] Caddy Reverse Proxy     → Auto HTTPS
+[08/10] Start All Services      → PostgreSQL → Gitea → Caddy
+[09/10] Admin Account           → Auto-generated credentials
+[10/10] Actions Runner          → act_runner + Docker
 ```
 
-### 支持系统
+### Supported Platforms
 
-| 发行版 | 架构 |
-|--------|------|
+| Distribution | Architecture |
+|--------------|--------------|
 | Debian / Ubuntu | amd64, arm64, armv7, riscv64, loong64 |
 | RHEL / Rocky / Alma / Fedora | amd64, arm64 |
 | Arch | amd64 |
 
 ---
 
-## 📋 命令速查
+## 📋 Quick Reference
 
 ### Caddy
 
 ```bash
-systemctl enable --now caddy    # 启动并设为开机自启
-systemctl reload caddy          # 重载配置（零停机）
-systemctl status caddy          # 查看服务状态
-journalctl -u caddy -f          # 实时日志
-caddy validate --config /etc/caddy/Caddyfile  # 校验配置
-nano /etc/caddy/Caddyfile       # 编辑 Caddyfile
+systemctl enable --now caddy    # Start & enable on boot
+systemctl reload caddy          # Graceful config reload
+systemctl status caddy          # Check service status
+journalctl -u caddy -f          # Follow logs
+caddy validate --config /etc/caddy/Caddyfile  # Validate config
+nano /etc/caddy/Caddyfile       # Edit Caddyfile
 ```
 
 ### Gitea
 
 ```bash
-systemctl restart gitea         # 重启 Gitea
-systemctl status gitea          # 查看服务状态
-journalctl -u gitea -f          # 实时日志
-nano /etc/gitea/app.ini         # 编辑 Gitea 配置
-su - gitea -c "gitea admin user list"  # 查看用户列表
+systemctl restart gitea         # Restart Gitea
+systemctl status gitea          # Check service status
+journalctl -u gitea -f          # Follow logs
+nano /etc/gitea/app.ini         # Edit configuration
+su - gitea -c "gitea admin user list"  # List admin users
 ```
 
 ---
 
-## 📁 文件结构
+## 📁 File Structure
 
 ```
-/usr/bin/caddy                     # Caddy 二进制
-/etc/caddy/Caddyfile               # Caddy 配置
-/etc/systemd/system/caddy.service  # Caddy systemd 单元
+/usr/bin/caddy                     # Caddy binary
+/etc/caddy/Caddyfile               # Caddy configuration
+/etc/systemd/system/caddy.service  # Caddy systemd unit
 
-/usr/local/bin/gitea               # Gitea 二进制
-/etc/gitea/app.ini                 # Gitea 配置
-/var/lib/gitea/                    # Gitea 数据目录
-/etc/systemd/system/gitea.service  # Gitea systemd 单元
+/usr/local/bin/gitea               # Gitea binary
+/etc/gitea/app.ini                 # Gitea configuration
+/var/lib/gitea/                    # Gitea data directory
+/etc/systemd/system/gitea.service  # Gitea systemd unit
 
-/etc/systemd/system/gitea-runner.service  # Actions Runner 单元
+/etc/systemd/system/gitea-runner.service  # Actions Runner unit
 ```
 
 ---
 
-## ⚙ 环境变量
+## ⚙ Environment Variables
 
-安装前可通过环境变量自定义行为：
+Customize behavior before running:
 
 ```bash
-# Caddy 安装器（全自动，无需交互）
+# Caddy Installer (fully automated, no interaction)
 sudo bash scripts/caddy_install.sh
 
-# Gitea 部署器
-export GT_VER="1.23.0"       # 指定 Gitea 版本，默认 latest
-export GT_PORT="8080"        # 指定 HTTP 端口，默认 3000
-export CD_ENABLE="true"      # 强制启用 Caddy 反代
-export CD_DOMAIN="git.example.com"  # 预设域名（跳过交互）
+# Gitea Deployer
+export GT_VER="1.23.0"       # Pin Gitea version, default latest
+export GT_PORT="8080"        # Custom HTTP port, default 3000
+export CD_ENABLE="true"      # Force Caddy reverse proxy
+export CD_DOMAIN="git.example.com"  # Pre-set domain (skip prompt)
 sudo -E bash scripts/gitea_install.sh
 ```
 
