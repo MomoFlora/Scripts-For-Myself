@@ -43,6 +43,7 @@ ask() {
 #  GLOBAL VARIABLES
 #===============================================================================
 readonly CURDIR="$(cd "$(dirname "$0")" && pwd)"
+readonly REPO_RAW="https://raw.githubusercontent.com/MomoFlora/Scripts-For-Myself/master"
 
 GT_VER="${GT_VER:-latest}"
 GT_USR="${GT_USR:-gitea}"
@@ -220,26 +221,8 @@ install_gitea() {
     chown -R "${GT_USR}:${GT_USR}" "$GT_HOME" /etc/gitea
     chmod 750 "$GT_HOME"
 
-    cat > /etc/systemd/system/gitea.service << UNIT
-[Unit]
-Description=Gitea (Git Service)
-After=network.target postgresql.service docker.service
-Wants=postgresql.service
-
-[Service]
-Type=simple
-User=${GT_USR}
-Group=${GT_USR}
-WorkingDirectory=${GT_HOME}
-ExecStart=${GT_BIN} web --config ${GT_CFG}
-Restart=always
-RestartSec=5s
-Environment=USER=${GT_USR} HOME=${GT_HOME} GITEA_WORK_DIR=${GT_HOME}
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-UNIT
+    curl -fsSL -o /etc/systemd/system/gitea.service "${REPO_RAW}/service/gitea.service"
+    sed -i "s|\${GT_USR}|${GT_USR}|g; s|\${GT_HOME}|${GT_HOME}|g; s|\${GT_BIN}|${GT_BIN}|g; s|\${GT_CFG}|${GT_CFG}|g" /etc/systemd/system/gitea.service
     systemctl daemon-reload
     ui_ok "Systemd service registered"
 }
@@ -307,15 +290,16 @@ install_caddy() {
     ui_step "Edge Routing (Caddy)"
 
     if ! command -v caddy &>/dev/null; then
-        rm -f /usr/share/keyrings/caddy-stable.gpg
-        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor --yes -o /usr/share/keyrings/caddy-stable.gpg || {
+        curl -fsSL https://github.com/MomoFlora/EasyCaddy/releases/latest/download/caddy-archive-keyring.gpg | \
+            tee /usr/share/keyrings/caddy-archive-keyring.gpg > /dev/null || {
             ui_err "Failed to import Caddy GPG key."
             exit 1
         }
-        
-        echo "deb [signed-by=/usr/share/keyrings/caddy-stable.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main" > /etc/apt/sources.list.d/caddy.list
-        
-        apt-get update -qq || true 
+
+        echo "deb [signed-by=/usr/share/keyrings/caddy-archive-keyring.gpg] https://github.com/MomoFlora/EasyCaddy/releases/latest/download/ ./" | \
+            tee /etc/apt/sources.list.d/caddy.list > /dev/null
+
+        apt-get update -qq || true
         apt-get install -y -qq -o Dpkg::Use-Pty=0 caddy || {
             ui_err "APT failed to install Caddy. Please check broken repositories."
             exit 1
@@ -408,26 +392,8 @@ setup_runner() {
         ui_err "Failed to extract valid token from Gitea API"
     fi
 
-    cat > /etc/systemd/system/gitea-runner.service << RUNSVC
-[Unit]
-Description=Gitea Actions Runner
-After=gitea.service docker.service
-Requires=docker.service
-Wants=gitea.service
-
-[Service]
-Type=simple
-User=${GT_USR}
-Group=${GT_USR}
-WorkingDirectory=${GT_HOME}
-ExecStart=/usr/local/bin/gitea-runner daemon
-Restart=always
-RestartSec=5s
-Environment=HOME=${GT_HOME}
-
-[Install]
-WantedBy=multi-user.target
-RUNSVC
+    curl -fsSL -o /etc/systemd/system/gitea-runner.service "${REPO_RAW}/service/gitea-runner.service"
+    sed -i "s|\${GT_USR}|${GT_USR}|g; s|\${GT_HOME}|${GT_HOME}|g" /etc/systemd/system/gitea-runner.service
     systemctl daemon-reload
     systemctl enable --now gitea-runner >/dev/null 2>&1
     ui_ok "Runner daemon active"

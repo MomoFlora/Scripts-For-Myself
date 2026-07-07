@@ -1,0 +1,18 @@
+[Unit]
+Description=Gitea (Git Service)
+After=network.target postgresql.service docker.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=${GT_USR}
+Group=${GT_USR}
+WorkingDirectory=${GT_HOME}
+ExecStart=${GT_BIN} web --config ${GT_CFG}
+Restart=always
+RestartSec=5s
+Environment=USER=${GT_USR} HOME=${GT_HOME} GITEA_WORK_DIR=${GT_HOME}
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

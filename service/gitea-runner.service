@@ -1,0 +1,18 @@
+[Unit]
+Description=Gitea Actions Runner
+After=gitea.service docker.service
+Requires=docker.service
+Wants=gitea.service
+
+[Service]
+Type=simple
+User=${GT_USR}
+Group=${GT_USR}
+WorkingDirectory=${GT_HOME}
+ExecStart=/usr/local/bin/gitea-runner daemon
+Restart=always
+RestartSec=5s
+Environment=HOME=${GT_HOME}
+
+[Install]
+WantedBy=multi-user.target
