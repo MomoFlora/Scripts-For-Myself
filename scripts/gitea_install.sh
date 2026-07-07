@@ -299,8 +299,8 @@ install_caddy() {
         echo "deb [signed-by=/usr/share/keyrings/caddy-archive-keyring.gpg] https://github.com/MomoFlora/EasyCaddy/releases/latest/download/ ./" | \
             tee /etc/apt/sources.list.d/caddy.list > /dev/null
 
-        apt-get update -qq || true
-        apt-get install -y -qq -o Dpkg::Use-Pty=0 caddy || {
+        apt-get update -qq >/dev/null 2>&1 || true
+        apt-get install -y -qq -o Dpkg::Use-Pty=0 caddy >/dev/null 2>&1 || {
             ui_err "APT failed to install Caddy. Please check broken repositories."
             exit 1
         }
