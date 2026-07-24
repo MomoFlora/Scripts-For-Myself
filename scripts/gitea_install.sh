@@ -373,17 +373,26 @@ setup_runner() {
     local token
     token="$(su -s /bin/bash "$GT_USR" -c "GITEA_WORK_DIR=${GT_HOME} ${GT_BIN} --config ${GT_CFG} actions generate-runner-token" | tail -1 | tr -d '[:space:]')"
 
+    # ── 1. 确定 Instance URL（Runner 注册地址 = Actions 容器内 Git 拉取地址） ──
+    local instance_url
+    if [ "$CD_ENABLE" = "true" ]; then
+        instance_url="https://${CD_DOMAIN}"
+    else
+        instance_url="http://localhost:${GT_PORT}"
+    fi
+    ui_info "Runner instance: ${instance_url}"
+
     if [ -n "$token" ] && [ ${#token} -ge 30 ]; then
         local reg_out
         reg_out="$(su -s /bin/bash "$GT_USR" -c "cd ${GT_HOME} && /usr/local/bin/gitea-runner register \
             --no-interactive \
-            --instance http://localhost:${GT_PORT} \
+            --instance ${instance_url} \
             --token '${token}' \
             --name 'runner-$(hostname)' \
             --labels 'ubuntu-latest:docker://node:20-bookworm,ubuntu-22.04:docker://node:20-bookworm'" 2>&1)" || true
 
         if echo "$reg_out" | grep -qi "success\|registered\|INFO.*register"; then
-            ui_ok "Runner registered successfully"
+            ui_ok "Runner registered (${instance_url})"
         else
             ui_err "Runner registration failed"
             ui_info "Debug: $reg_out"
